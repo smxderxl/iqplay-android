@@ -1,0 +1,90 @@
+# ---------------------------------------------------------------------------
+# 云端打安卓 APK（GitHub Actions）
+#
+# 为什么走云：buildozer 只能跑在 Linux 上，本机是 Windows 且 WSL 被策略拦住。
+# 这里用 kivy 官方维护的 buildozer 镜像——里面已经预装 Android SDK/NDK，
+# 比从零下载（3~5 GB）快很多。
+#
+# 用法：
+#   1) 把仓库推到 GitHub
+#   2) 到 Actions 页面点 "Build Android APK" -> Run workflow（或直接 push 触发）
+#   3) 跑完在页面底部 Artifacts 里下载 apk 压缩包
+# ---------------------------------------------------------------------------
+name: Build Android APK
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - "main.py"
+      - "iqplay_android.py"
+      - "iqdsp.py"
+      - "buildozer.spec"
+      - ".github/workflows/**"
+  workflow_dispatch:            # 也支持手动点按钮触发
+
+jobs:
+  build-apk:
+    name: 构建 debug APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 取出源码
+        uses: actions/checkout@v4
+
+      # buildozer 会把 source.dir **整个**打包，而本仓库里还有别的文件。
+      # 先把该进包的东西拷进一个干净目录，避免混入无关文件。
+      - name: 准备干净构建目录
+        run: |
+          set -e
+          mkdir -p _apk_stage
+          for f in main.py iqplay_android.py iqdsp.py buildozer.spec; do
+            if [ ! -f "$f" ]; then echo "缺少源文件: $f"; exit 1; fi
+            cp "$f" _apk_stage/
+          done
+          # 有中文字体兜底就一起带上
+          for f in font.ttf 字体.ttf icon.png presplash.png; do
+            [ -f "$f" ] && cp "$f" _apk_stage/ || true
+          done
+          echo "== 暂存目录 =="
+          ls -la _apk_stage
+
+      - name: 预热 buildozer 缓存（复用 SDK/NDK）
+        uses: actions/cache@v4
+        with:
+          path: |
+            _apk_stage/.buildozer
+            ~/.buildozer
+          key: buildozer-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
+          restore-keys: |
+            buildozer-${{ runner.os }}-
+
+      - name: 构建 APK
+        run: |
+          set -e
+          cd _apk_stage
+          # 用 kivy 官方镜像：已内置 Android SDK / NDK / buildozer 依赖
+          docker run --rm \
+            -v "$PWD":/home/user/hostcwd \
+            -v "$HOME/.buildozer":/home/user/.buildozer \
+            kivy/buildozer:latest \
+            android debug
+
+      - name: 收集产物
+        run: |
+          set -e
+          echo "== 找到的 APK =="
+          find _apk_stage -name "*.apk" -type f -exec ls -lh {} \;
+          mkdir -p apk-out
+          find _apk_stage -name "*.apk" -type f -exec cp {} apk-out/ \;
+          # 顺手把构建日志也带上，方便排查真机问题
+          [ -f _apk_stage/.buildozer/android/platform/build-arm64-v8a_armeabi-v7a/build.log ] \
+            && cp _apk_stage/.buildozer/android/platform/build-arm64-v8a_armeabi-v7a/build.log apk-out/ || true
+
+      - name: 上传 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: iqplay-apk
+          path: apk-out/
+          if-no-files-found: error
+          retention-days: 30
