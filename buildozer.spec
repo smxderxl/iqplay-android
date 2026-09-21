@@ -38,13 +38,15 @@ version = 3.2
 requirements = python3,kivy==2.3.0,numpy,pyjnius
 
 orientation = portrait
-fullscreen = 0                     # 留状态栏，避免刘海遮住顶部工具条
+# 留状态栏，避免刘海遮住顶部工具条
+fullscreen = 0
 android.presplash_color = #101216
 android.archs = arm64-v8a, armeabi-v7a
 
 # ---- Android SDK/NDK ----
 android.api = 34
-android.minapi = 24                # 覆盖到 Android 7.0
+# 覆盖到 Android 7.0
+android.minapi = 24
 android.ndk = 25b
 android.accept_sdk_license = True
 # 允许 p4a 用预编译轮子，省掉 numpy 的长时间交叉编译
