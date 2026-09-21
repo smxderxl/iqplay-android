@@ -20,25 +20,36 @@ source.dir = .
 source.include_exts = py,png,jpg,jpeg,kv,atlas,ttf,ttc,otf,json
 # 本目录很杂（几十个无关 .py / cs16 / 截图），下面这条尽量把噪声挡掉；
 # 但 buildozer 只支持"扩展名白名单 + 排除 glob"，没有真正的白名单机制，
-# 所以**推荐用 打包APK.sh**——它先把该进包的三个文件摆进干净的 _apk_stage/
-# 再构建，效果最可靠。
-source.exclude_patterns = _*,IQ*,iqplay0911.py,iqplay_android.py.bak,*.spec,备份*,*.bak,(2).py,2.py,4.py,188665,6a7dd05c*.py,__pycache__,build,dist,bin,.buildozer,*.log,*.csv
+# 所以真正可靠的做法是**先建一个只有四个文件的干净目录再构建**——
+# 本地用 `打包APK.sh`，云端由 GitHub Actions 的 "准备干净构建目录" 步骤完成。
+#
+# 注意：不要在这里排除 _*.py——_extract_dsp.py 只是抽取工具、进不进包无所谓，
+# 但真正的源码一个都不能误伤。下面排的是数据文件与备份。
+# 不要排除 *.png——APK 的 icon.png / presplash.png 就是 png。
+source.exclude_patterns = iqplay0911.py,iqplay_android.py.bak,备份*,*.bak,(2).py,2.py,4.py,188665,6a7dd05c*.py,__pycache__,build,dist,bin,.buildozer,*.log,*.csv,*.cs16,*.c16,*.wav
 
 version = 3.2
 
-# numpy 必须显式写；kivy 卡在 2.3.x（2.2 与新版 numpy 有 ABI 冲突）
-requirements = python3,kivy==2.3.0,numpy,pyjnius,android
+# p4a 官方推荐的组合。
+#  - kivy 2.3.x 与 ndk 25b 是配套的（25b 之前/之后的 NDK 会有 sysroot 变更）
+#  - 不要写裸的 `android`：它在 p4a 里不是独立 recipe 名，写了会构建失败
+#  - 需要 pyjnius 用于 Toast / 权限申请，它会被 kivy 的 android 依赖自动带上，
+#    这里显式列出只是为了固定版本解析
+requirements = python3,kivy==2.3.0,numpy,pyjnius
 
 orientation = portrait
 fullscreen = 0                     # 留状态栏，避免刘海遮住顶部工具条
 android.presplash_color = #101216
 android.archs = arm64-v8a, armeabi-v7a
 
-# ---- Android SDK/NDK（首次构建要下载，版本可随本机 SDK 改）----
+# ---- Android SDK/NDK ----
 android.api = 34
 android.minapi = 24                # 覆盖到 Android 7.0
 android.ndk = 25b
 android.accept_sdk_license = True
+# 允许 p4a 用预编译轮子，省掉 numpy 的长时间交叉编译
+android.skip_update = False
+p4a.branch = master
 
 # 读 IQ 文件 / 导出 WAV·PNG 需要存储权限
 android.permissions = READ_EXTERNAL_STORAGE,WRITE_EXTERNAL_STORAGE,MANAGE_EXTERNAL_STORAGE
