@@ -49,15 +49,27 @@ jobs:
           echo "== 暂存目录 =="
           ls -la _apk_stage
 
+      # 只清掉上一次用错误版本（python 3.14.2 / numpy v2.3.0）编出来的产物。
+      # 注意：不能 rm -rf ~/.buildozer —— 那里是 Android SDK/NDK（3~5 GB），
+      # 删掉每次构建都要重新下载，白白多花十几分钟。SDK/NDK 与 python 版本无关，
+      # 可以安全复用。
+      - name: 清理旧的 python/numpy 构建产物（保留 SDK/NDK）
+        run: |
+          rm -rf _apk_stage/.buildozer/android/platform/build-* || true
+          rm -rf _apk_stage/.buildozer/android/platform/dists || true
+          echo "已清理旧构建产物，SDK/NDK 保留："
+          ls _apk_stage/.buildozer/android/platform/ 2>/dev/null || true
+
+      # 缓存前缀升到 v2：确保不会命中 v1 里那份按 python 3.14.2 构建的环境。
       - name: 预热 buildozer 缓存（复用 SDK/NDK）
         uses: actions/cache@v4
         with:
           path: |
             _apk_stage/.buildozer
             ~/.buildozer
-          key: buildozer-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
+          key: buildozer-v2-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
           restore-keys: |
-            buildozer-${{ runner.os }}-
+            buildozer-v2-${{ runner.os }}-
 
       - name: 构建 APK
         run: |
