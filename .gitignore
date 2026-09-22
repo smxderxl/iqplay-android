@@ -23,6 +23,8 @@
 !.github/
 !.github/**
 !.gitignore
+!.gitattributes
+!ci_build_apk.sh
 !安卓版使用说明.md
 !打包APK操作指引.md
 !打包APK.sh

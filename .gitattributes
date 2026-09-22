@@ -1,0 +1,17 @@
+# 强制这些文件在仓库里保持 LF —— Windows 的 autocrlf 会把换行转成 CRLF，
+# 而 shell 脚本 / YAML 到 Linux 上跑会因为 ^M 报 "bad interpreter"。
+*.sh            text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+*.py            text eol=lf
+
+# 文本文件统一按文本处理、diff 友好
+*.md            text
+*.spec          text
+.gitignore      text
+
+# 二进制不要乱转
+*.png           binary
+*.ttf           binary
+*.ttc           binary
+*.apk           binary

@@ -12,13 +12,20 @@ buildozer.spec 静态检查 —— 专查本项目在云端构建时真实踩过
       否则 "python3 should have same version as hostpython3, X != Y"
   [3] numpy 版本写法必须带 'v'（git tag），python3 不能带 'v'（tarball）
   [4] requirements 里不能写裸的 'android'
+  [5] workflow 里的 docker 镜像必须锁 digest（不能用 :latest，它会静默换
+      掉镜像内的 python/pip 组合，同一个 commit 今天能过、明天就挂）
+  [6] 修复 venv 的 find 表达式：venv 的 bin/python 是**符号链接**，
+      用 `-type f -path '*/bin/python'` 会命中 0 个，必须按目录名找
 """
 import configparser
 import os
 import re
 import sys
 
-SPEC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "buildozer.spec")
+_HERE = os.path.dirname(os.path.abspath(__file__))
+SPEC = os.path.join(_HERE, "buildozer.spec")
+WORKFLOW = os.path.join(_HERE, ".github", "workflows", "build-apk.yml")
+CI_SCRIPT = os.path.join(_HERE, "ci_build_apk.sh")
 
 
 def main():
@@ -102,6 +109,52 @@ def main():
         fails.append("裸 android")
     else:
         print("    OK")
+
+    # ---- [5] workflow 镜像锁 digest ----
+    print("\n[5] workflow 的 docker 镜像是否锁 digest（不能用 :latest）")
+    if not os.path.exists(WORKFLOW):
+        print("    [FAIL] 找不到 .github/workflows/build-apk.yml")
+        fails.append("workflow 缺失")
+    else:
+        wf = open(WORKFLOW, encoding="utf-8").read()
+        # 去掉注释行再检查：注释里会写 "ghcr.io/kivy/buildozer:latest" 这种
+        # 升级示例，不剔除就会把示例当成真实引用（这个坑本脚本自己踩过一次）
+        code = "\n".join(l for l in wf.splitlines()
+                         if not l.strip().startswith("#"))
+        pinned = re.findall(r"[\w./-]+@sha256:[0-9a-f]{64}", code)
+        mut = re.findall(r"(?:ghcr\.io/)?kivy/buildozer:([a-zA-Z0-9._-]+)", code)
+        if mut:
+            print(f"    [FAIL] 用了可变标签: {sorted(set(mut))} -- 锁到 @sha256:... 才行")
+            fails.append("镜像未锁 digest")
+        elif pinned:
+            print(f"    OK  已锁 digest: {pinned[0][:64]}...")
+        else:
+            print("    [FAIL] workflow 里没找到任何 @sha256: 形式的镜像引用")
+            fails.append("镜像未锁 digest")
+        if "PIP_CONSTRAINT" not in wf and "PIP_CONSTRAINT" not in (
+                open(CI_SCRIPT, encoding="utf-8").read() if os.path.exists(CI_SCRIPT) else ""):
+            print("    [FAIL] 没有任何 PIP_CONSTRAINT 兜住 p4a 内部的 pip 升级")
+            fails.append("缺 PIP_CONSTRAINT")
+        else:
+            print("    OK  有 PIP_CONSTRAINT 钉住 pip 版本")
+
+    # ---- [6] venv 修复用的 find 写法 ----
+    print("\n[6] 修复 venv 的 find 表达式")
+    if not os.path.exists(CI_SCRIPT):
+        print("    [FAIL] 找不到 ci_build_apk.sh")
+        fails.append("修复脚本缺失")
+    else:
+        ci = open(CI_SCRIPT, encoding="utf-8").read()
+        # venv 的 bin/python 是符号链接，-type f 命中不到
+        if re.search(r"-type\s+f[^\n]*-path[^\n]*bin/python", ci):
+            print("    [FAIL] 用了 -type f -path '*/bin/python'：venv 的 bin/python 是"
+                  "符号链接，会命中 0 个")
+            fails.append("find 写法会漏掉 venv")
+        elif re.search(r"-type\s+d\s+-name\s+venv", ci):
+            print("    OK  按目录名 (-type d -name venv) 查找，能正确命中")
+        else:
+            print("    [FAIL] ci_build_apk.sh 里没有可靠的 venv 查找逻辑")
+            fails.append("缺 venv 查找")
 
     # ---- 汇总 ----
     print("\n" + "=" * 46)

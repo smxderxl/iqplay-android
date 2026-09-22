@@ -21,7 +21,24 @@ on:
       - "iqdsp.py"
       - "buildozer.spec"
       - ".github/workflows/**"
+      - "ci_build_apk.sh"
   workflow_dispatch:            # 也支持手动点按钮触发
+
+env:
+  # 镜像锁到 digest，不用 latest —— latest 会静默换掉里面的 python/pip 组合，
+  # 同一个 commit 今天能过、明天就挂（我们已经被它坑过一次）。
+  #
+  # 想升级镜像时执行下面这行拿到新 digest，替换 IMAGE 的值即可：
+  #   docker pull ghcr.io/kivy/buildozer:latest && docker inspect \
+  #     --format='{{index .RepoDigests 0}}' ghcr.io/kivy/buildozer:latest
+  IMAGE: "ghcr.io/kivy/buildozer@sha256:d5b9d1b5e3241fc6ec8eb78b8ecff9e975054645e26c07075c0a60d18c471c1f"
+  # p4a 会往它自己创建的 build venv 里 `pip install -U pip`，而"升级"过程会
+  # 留下模块混装的 pip（新版 main.py + 旧版 spinners.py），导致
+  #   ImportError: cannot import name 'open_rich_spinner' from
+  #   'pip._internal.cli.spinners'
+  # 该 API 是 pip 25.2 才引入的。这里用约束文件把版本钉死，让所有 pip 调用
+  # （包括 p4a 内部那次）都装出同一份完整的 wheel。
+  PIP_PIN: "25.2"
 
 jobs:
   build-apk:
@@ -49,15 +66,17 @@ jobs:
           echo "== 暂存目录 =="
           ls -la _apk_stage
 
-      # 整个 _apk_stage/.buildozer 都清掉：里面有 p4a 的 git 克隆和
-      # 各 recipe 的构建产物，跨版本复用很容易出诡异错误。
-      # 注意：不能删 ~/.buildozer —— 那里是 Android SDK/NDK（3~5 GB），
-      # 删掉每次构建都要重下，白白多花十几分钟。SDK/NDK 与 python 版本无关，
-      # 跨版本可以安全复用。
+      # 整个 _apk_stage/.buildozer 都清掉：里面有 p4a 的 git 克隆、各 recipe 的
+      # 构建产物，以及那个**可能已经被弄坏的 build/venv**。跨版本复用很容易出
+      # 诡异错误（我们已经中过一次"陈旧环境"）。
+      # 注意：不能删 ~/.buildozer —— 那里是 Android SDK/NDK（3~5 GB），删掉每次
+      # 构建都要重下，白白多花十几分钟。SDK/NDK 与 python 版本无关，可安全复用；
+      # 只顺手清掉它里面残留的 build venv。
       - name: 清空项目构建目录（保留 SDK/NDK）
         run: |
           rm -rf _apk_stage/.buildozer || true
-          echo "已清空 _apk_stage/.buildozer"
+          find "$HOME/.buildozer" -type d -name venv -prune -print -exec rm -rf {} + 2>/dev/null || true
+          echo "已清空 _apk_stage/.buildozer（SDK/NDK 保留）"
 
       # 只缓存 SDK/NDK（~/.buildozer），不再缓存整个构建目录。
       - name: 复用 SDK/NDK 缓存
@@ -65,30 +84,34 @@ jobs:
         with:
           path: |
             ~/.buildozer
-          key: sdk-ndk-v1-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
+          key: sdk-ndk-v2-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
           restore-keys: |
-            sdk-ndk-v1-${{ runner.os }}-
+            sdk-ndk-v2-${{ runner.os }}-
 
       - name: 构建 APK
         run: |
           set -e
           cd _apk_stage
+
           # 用 kivy 官方镜像：已内置 Android SDK / NDK / buildozer 依赖。
           #
-          # 这里没有直接用默认的 entrypoint，而是先 bash 里把 pip 升到 >=25.2，
-          # 再 exec 官方 entrypoint.sh。原因：
-          #   构建曾报 "cannot import name 'open_rich_spinner' from
-          #   'pip._internal.cli.spinners'" —— 该 API 是 pip 25.2 才新增的，
-          #   镜像 venv 里自带的 pip 比这旧。无论到底是谁 import 它，
-          #   把 pip 升上去都能满足。
-          #   必须 exec 回官方 entrypoint.sh：它负责把容器用户映射成宿主机
-          #   UID/GID（否则挂载目录里产生的文件是 root 的，后续步骤会权限报错）。
+          # 这里替换掉镜像默认的 entrypoint，改跑我们的 ci_build_apk.sh：
+          #   1) 先设 PIP_CONSTRAINT 把 pip 钉到 PIP_PIN（预防模块混装）
+          #   2) 跑一次 buildozer
+          #   3) 若失败，逐个修复 .buildozer 里 p4a 建的 venv（用 venv 自己的
+          #      python 执行 pip，而不是容器里无关的系统 pip），然后重试一次
+          #
+          # 脚本挂在 /ci_build_apk.sh（在 /home/user 之外）。不能挂到 /home/user
+          # 里面：官方 entrypoint.sh 会 `chown --recursive /home/user`，碰到只读
+          # 挂载会报错，而它开头就是 `set -euo pipefail`，整条构建会直接中断。
           docker run --rm \
             -v "$PWD":/home/user/hostcwd \
             -v "$HOME/.buildozer":/home/user/.buildozer \
+            -v "$GITHUB_WORKSPACE/ci_build_apk.sh":/ci_build_apk.sh:ro \
+            -e PIP_PIN="$PIP_PIN" \
             --entrypoint /bin/bash \
-            kivy/buildozer:latest \
-            -c "pip install -q --upgrade 'pip>=25.2' && exec /usr/local/bin/entrypoint.sh android debug"
+            "$IMAGE" \
+            -c "bash /ci_build_apk.sh"
 
       - name: 收集产物
         run: |
