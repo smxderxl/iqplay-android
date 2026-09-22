@@ -15,7 +15,10 @@ buildozer.spec 静态检查 —— 专查本项目在云端构建时真实踩过
   [5] workflow 里的 docker 镜像必须锁 digest（不能用 :latest，它会静默换
       掉镜像内的 python/pip 组合，同一个 commit 今天能过、明天就挂）
   [6] 修复 venv 的 find 表达式：venv 的 bin/python 是**符号链接**，
-      用 `-type f -path '*/bin/python'` 会命中 0 个，必须按目录名找
+      用 `-type f -path '*/bin/python'` 会命中 0 个，必须按目录名找；
+      并禁止按名字删 `build`（会删掉 $NDK/build）、禁止只做原地修 pip
+  [7] workflow 里对缓存目录（~/.buildozer）用 find 必须加 `|| true`：
+      冷缓存时目录不存在，find 返回非 0 会让该步骤直接失败
 """
 import configparser
 import os
@@ -139,22 +142,72 @@ def main():
             print("    OK  有 PIP_CONSTRAINT 钉住 pip 版本")
 
     # ---- [6] venv 修复用的 find 写法 ----
-    print("\n[6] 修复 venv 的 find 表达式")
+    print("\n[6] 修复脚本的 venv 清理写法与约束校验")
     if not os.path.exists(CI_SCRIPT):
         print("    [FAIL] 找不到 ci_build_apk.sh")
         fails.append("修复脚本缺失")
     else:
         ci = open(CI_SCRIPT, encoding="utf-8").read()
+        # 去掉注释行再检查：注释里会举例写 `--force-reinstall`、`-name build`、
+        # `pip install -U pip` 等，全文匹配会把注释误判成真实代码
+        # （本脚本已经在 workflow 检查上踩过一次同类坑）
+        ci_code = "\n".join(l for l in ci.splitlines()
+                            if not l.lstrip().startswith("#"))
+
         # venv 的 bin/python 是符号链接，-type f 命中不到
-        if re.search(r"-type\s+f[^\n]*-path[^\n]*bin/python", ci):
+        if re.search(r"-type\s+f[^\n]*-path[^\n]*bin/python", ci_code):
             print("    [FAIL] 用了 -type f -path '*/bin/python'：venv 的 bin/python 是"
                   "符号链接，会命中 0 个")
             fails.append("find 写法会漏掉 venv")
-        elif re.search(r"-type\s+d\s+-name\s+venv", ci):
+        elif re.search(r"-type\s+d\s+-name\s+venv", ci_code):
             print("    OK  按目录名 (-type d -name venv) 查找，能正确命中")
         else:
             print("    [FAIL] ci_build_apk.sh 里没有可靠的 venv 查找逻辑")
             fails.append("缺 venv 查找")
+
+        # 只删 venv，绝不能按名字删 build（会删掉 $NDK/build）
+        if re.search(r"-name\s+[\"']?build[\"']?", ci_code):
+            print("    [FAIL] 出现按名字删 build 的写法：会删掉 $NDK/build/"
+                  "（android.toolchain.cmake / build/core），把缓存的 NDK 弄废")
+            fails.append("会误删 NDK/build")
+        else:
+            print("    OK  没有按名字删 build 的危险写法")
+
+        # 原地修 pip 修不干净：force-reinstall 不删新版本已移除的旧文件
+        if "--force-reinstall" in ci_code:
+            print("    [FAIL] 只做原地修 pip：--force-reinstall 不会删掉新版本已移除的"
+                  "旧文件，混装依旧；应直接删 venv 让 p4a 重建")
+            fails.append("只原地修 pip")
+        else:
+            print("    OK  走的是「删 venv 重建」而非原地修 pip")
+
+        # 约束文件要能被校验（设了不等于生效）
+        if re.search(r"PIP_CONSTRAINT", ci_code) and \
+                re.search(r"-s\s+[\"']?\$PIP_CONSTRAINT", ci_code):
+            print("    OK  有 PIP_CONSTRAINT 约束文件存在性/非空校验")
+        else:
+            print("    [FAIL] 没有校验 PIP_CONSTRAINT 对应的约束文件真的存在且非空")
+            fails.append("缺约束文件校验")
+
+    # 注：ci_build_apk.sh 刻意不开 `set -e`（第一轮失败后要接着重试），
+    # 所以 process substitution 里的 find 失败不会中断；真正需要 `|| true`
+    # 的是 workflow 里那步（那里出错会让整个 job 失败）。
+    print("\n[7] workflow 清理步骤对缓存目录 find 的容错")
+    if not os.path.exists(WORKFLOW):
+        print("    [FAIL] 找不到 workflow")
+        fails.append("workflow 缺失")
+    else:
+        bad = [l.strip() for l in open(WORKFLOW, encoding="utf-8").read().splitlines()
+               if "find" in l and ".buildozer" in l and "|| true" not in l
+               and not l.strip().startswith("#")]
+        if bad:
+            print("    [FAIL] 这些 find 没加 '|| true'：冷缓存时目录不存在，"
+                  "find 返回非 0 会让该步骤失败")
+            for l in bad:
+                print(f"      {l}")
+            fails.append("workflow find 缺 || true")
+        else:
+            print("    OK  workflow 里的 find 都有容错")
 
     # ---- 汇总 ----
     print("\n" + "=" * 46)
