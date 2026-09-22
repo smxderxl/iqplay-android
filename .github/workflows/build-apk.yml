@@ -49,38 +49,46 @@ jobs:
           echo "== 暂存目录 =="
           ls -la _apk_stage
 
-      # 只清掉上一次用错误版本（python 3.14.2 / numpy v2.3.0）编出来的产物。
-      # 注意：不能 rm -rf ~/.buildozer —— 那里是 Android SDK/NDK（3~5 GB），
-      # 删掉每次构建都要重新下载，白白多花十几分钟。SDK/NDK 与 python 版本无关，
-      # 可以安全复用。
-      - name: 清理旧的 python/numpy 构建产物（保留 SDK/NDK）
+      # 整个 _apk_stage/.buildozer 都清掉：里面有 p4a 的 git 克隆和
+      # 各 recipe 的构建产物，跨版本复用很容易出诡异错误。
+      # 注意：不能删 ~/.buildozer —— 那里是 Android SDK/NDK（3~5 GB），
+      # 删掉每次构建都要重下，白白多花十几分钟。SDK/NDK 与 python 版本无关，
+      # 跨版本可以安全复用。
+      - name: 清空项目构建目录（保留 SDK/NDK）
         run: |
-          rm -rf _apk_stage/.buildozer/android/platform/build-* || true
-          rm -rf _apk_stage/.buildozer/android/platform/dists || true
-          echo "已清理旧构建产物，SDK/NDK 保留："
-          ls _apk_stage/.buildozer/android/platform/ 2>/dev/null || true
+          rm -rf _apk_stage/.buildozer || true
+          echo "已清空 _apk_stage/.buildozer"
 
-      # 缓存前缀升到 v2：确保不会命中 v1 里那份按 python 3.14.2 构建的环境。
-      - name: 预热 buildozer 缓存（复用 SDK/NDK）
+      # 只缓存 SDK/NDK（~/.buildozer），不再缓存整个构建目录。
+      - name: 复用 SDK/NDK 缓存
         uses: actions/cache@v4
         with:
           path: |
-            _apk_stage/.buildozer
             ~/.buildozer
-          key: buildozer-v2-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
+          key: sdk-ndk-v1-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
           restore-keys: |
-            buildozer-v2-${{ runner.os }}-
+            sdk-ndk-v1-${{ runner.os }}-
 
       - name: 构建 APK
         run: |
           set -e
           cd _apk_stage
-          # 用 kivy 官方镜像：已内置 Android SDK / NDK / buildozer 依赖
+          # 用 kivy 官方镜像：已内置 Android SDK / NDK / buildozer 依赖。
+          #
+          # 这里没有直接用默认的 entrypoint，而是先 bash 里把 pip 升到 >=25.2，
+          # 再 exec 官方 entrypoint.sh。原因：
+          #   构建曾报 "cannot import name 'open_rich_spinner' from
+          #   'pip._internal.cli.spinners'" —— 该 API 是 pip 25.2 才新增的，
+          #   镜像 venv 里自带的 pip 比这旧。无论到底是谁 import 它，
+          #   把 pip 升上去都能满足。
+          #   必须 exec 回官方 entrypoint.sh：它负责把容器用户映射成宿主机
+          #   UID/GID（否则挂载目录里产生的文件是 root 的，后续步骤会权限报错）。
           docker run --rm \
             -v "$PWD":/home/user/hostcwd \
             -v "$HOME/.buildozer":/home/user/.buildozer \
+            --entrypoint /bin/bash \
             kivy/buildozer:latest \
-            android debug
+            -c "pip install -q --upgrade 'pip>=25.2' && exec /usr/local/bin/entrypoint.sh android debug"
 
       - name: 收集产物
         run: |

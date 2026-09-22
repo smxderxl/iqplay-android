@@ -64,8 +64,12 @@ android.api = 34
 android.minapi = 24
 android.ndk = 25b
 android.accept_sdk_license = True
-# 允许 p4a 用预编译轮子，省掉 numpy 的长时间交叉编译
 android.skip_update = False
+
+# 不要用 stable 分支！它多年没更新了：numpy recipe 还停在 1.9.2（pypi.python.org
+# 的老地址），连 python3 / hostpython3 recipe 都不存在，一用就崩。
+# master / develop 的 recipe 默认值会随时间漂移（python3 曾默认 3.14.2、
+# numpy 曾默认 v2.3.0），所以下面 requirements 里该锁的都必须锁死。
 p4a.branch = master
 
 # 读 IQ 文件 / 导出 WAV·PNG 需要存储权限
