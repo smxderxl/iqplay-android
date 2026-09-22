@@ -25,6 +25,8 @@
 !.gitignore
 !.gitattributes
 !ci_build_apk.sh
+!prepare_p4a.sh
+!patch_p4a_pip.py
 !安卓版使用说明.md
 !打包APK操作指引.md
 !打包APK.sh

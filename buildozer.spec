@@ -78,8 +78,23 @@ android.skip_update = False
 # 说明：buildozer 是通过 p4a.branch 去 git clone p4a 的
 #       （targets/android.py: p4a.url / p4a.branch），
 #       所以 pip 上的 python-for-android 包根本不会被用到，别去 pip 装它。
-#       buildozer 用 `git fetch --tags` + `git checkout`，因此 tag 可以写在这里。
+#
+# p4a.branch 在这里还有第二个用途：**我们自己**的 prepare_p4a.sh 会读这一行
+# 决定克隆哪个 tag。设了下面的 p4a.source_dir 之后 buildozer 会忽略它
+# （见 _install_p4a：有 source_dir 时只检查目录是否存在，不 clone 也不改）。
 p4a.branch = v2026.05.09
+
+# 指向我们自己准备的 p4a 检出（prepare_p4a.sh 克隆到该位置并打 pip 加固补丁）。
+# 为什么必须这么做：buildozer 每次构建都会检查已存在的 p4a 目录，并且
+#   - 用 tag 克隆时 HEAD 是 detached，它从 `git branch -vv` 解析出 "(HEAD"
+#     与 p4a.branch 不等 -> 直接 rmdir 重克隆；
+#   - 分支名恰好匹配时又会 `git clean -dxf` + `git pull`，p4a.commit 非 HEAD
+#     还会 `git reset --hard`。
+# 这几种都会抹掉我们打的补丁。设了 p4a.source_dir 之后 buildozer 完全不碰它。
+# 路径相对于"运行 buildozer 时的当前目录"（我们固定先 cd 到 _apk_stage）。
+# 放在 .buildozer/ 下还有个好处：buildozer 打包时会跳过任何以 "." 开头的路径
+# （buildozer/__init__.py "avoid hidden directory"），所以不会进 APK。
+p4a.source_dir = .buildozer/android/platform/python-for-android
 
 # 读 IQ 文件 / 导出 WAV·PNG 需要存储权限
 android.permissions = READ_EXTERNAL_STORAGE,WRITE_EXTERNAL_STORAGE,MANAGE_EXTERNAL_STORAGE

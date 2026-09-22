@@ -16,8 +16,11 @@ buildozer.spec 静态检查 —— 专查本项目在云端构建时真实踩过
       python 太新，p4a 交叉编译会炸）；apt 列表不能含 libtinfo5（ubuntu 24.04
       已无此包）；不要 pip install python-for-android —— buildozer 是
       `p4a.url` + `p4a.branch` 去 git clone p4a，pip 那个包根本不会被用到
-  [6] p4a.branch 必须锁到具体 release tag（master/develop 的 recipe 默认值
-      会漂移，同一个 commit 今天能过明天可能挂）
+  [6] p4a 的取材方式：p4a.branch 必须锁 release tag；必须设 p4a.source_dir
+      （否则 buildozer 会自己 clone/clean/pull/reset p4a，把我们的 pip 加固补丁
+      抹掉），且该路径必须含以 "." 开头的目录段（buildozer 打包只自动跳过隐藏
+      目录，否则整个 p4a 会被塞进 APK）；prepare_p4a.sh 的路径要与 spec 一致、
+      要调用 patch_p4a_pip.py；ci_build_apk.sh 构建前要校验补丁标记
   [7] 修复脚本：venv 的 bin/python 是**符号链接**，
       用 `-type f -path '*/bin/python'` 会命中 0 个，必须按目录名找；
       并禁止按名字删 `build`（会删掉 $NDK/build）、禁止只做原地修 pip
@@ -34,6 +37,8 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 SPEC = os.path.join(_HERE, "buildozer.spec")
 WORKFLOW = os.path.join(_HERE, ".github", "workflows", "build-apk.yml")
 CI_SCRIPT = os.path.join(_HERE, "ci_build_apk.sh")
+PREPARE_SCRIPT = os.path.join(_HERE, "prepare_p4a.sh")
+PATCH_SCRIPT = os.path.join(_HERE, "patch_p4a_pip.py")
 
 
 def main():
@@ -180,11 +185,12 @@ def main():
         else:
             print("    OK  有 PIP_CONSTRAINT 钉住 pip 版本")
 
-    # ---- [6] p4a.branch 要锁到具体 tag ----
-    print("\n[6] p4a.branch 不能是漂移分支")
+    # ---- [6] p4a 的取材方式（锁 tag + 用 source_dir 自管 + 补丁校验）----
+    print("\n[6] p4a 的取材方式")
     branch = (app.get("p4a.branch") or "").strip()
     if not branch:
-        print("    [WARN] 没写 p4a.branch，buildozer 会用默认 master（会漂移）")
+        print("    [FAIL] 没写 p4a.branch：prepare_p4a.sh 靠它决定克隆哪个 tag")
+        fails.append("缺 p4a.branch")
     elif branch in ("master", "develop", "stable", "main"):
         print(f"    [FAIL] p4a.branch = {branch} 是会漂移的分支；recipe 默认值会变"
               "（python3 曾默认 3.14.2、numpy 曾默认 v2.3.0），同一个 commit"
@@ -195,6 +201,49 @@ def main():
               "（形如 v2026.05.09）")
     else:
         print(f"    OK  已锁到 tag: {branch}")
+
+    src_dir = (app.get("p4a.source_dir") or "").strip()
+    if not src_dir:
+        print("    [FAIL] 没设 p4a.source_dir：buildozer 会自己 clone/clean/pull/reset"
+              " p4a，把我们打好的 pip 加固补丁抹掉")
+        fails.append("缺 p4a.source_dir")
+    else:
+        print(f"    OK  已设 p4a.source_dir = {src_dir}")
+        # buildozer 打包只自动跳过以 "." 开头的路径，其它一律会被塞进 APK
+        if not any(part.startswith(".") for part in src_dir.replace("\\", "/").split("/")):
+            print("    [FAIL] p4a.source_dir 不以 '.' 开头：buildozer 打包时**不会**"
+                  "自动跳过它，整个 p4a 源码会被塞进 APK。放到 .buildozer/ 下面"
+                  "（buildozer/__init__.py 里 'avoid hidden directory'）")
+            fails.append("p4a 会被打进 APK")
+        else:
+            print("    OK  路径含以 '.' 开头的目录，打包时会被自动跳过")
+
+        if os.path.exists(PREPARE_SCRIPT):
+            prep = open(PREPARE_SCRIPT, encoding="utf-8").read()
+            m = re.search(r'P4A_REL="\$\{P4A_REL:-([^}]*)\}"', prep)
+            rel = m.group(1) if m else None
+            if rel != src_dir:
+                print(f"    [FAIL] prepare_p4a.sh 的 P4A_REL={rel!r} 与 spec 的"
+                      f" p4a.source_dir={src_dir!r} 不一致，克隆位置和 buildozer 找的"
+                      "位置就对不上了")
+                fails.append("p4a 路径不一致")
+            else:
+                print(f"    OK  prepare_p4a.sh 与 spec 路径一致：{rel}")
+            if "patch_p4a_pip.py" not in prep:
+                print("    [FAIL] prepare_p4a.sh 里没有调用 patch_p4a_pip.py")
+                fails.append("准备脚本没打补丁")
+        else:
+            print("    [FAIL] 找不到 prepare_p4a.sh")
+            fails.append("准备脚本缺失")
+
+    if os.path.exists(CI_SCRIPT):
+        ci = open(CI_SCRIPT, encoding="utf-8").read()
+        if "p4a-pip-hardening" not in ci:
+            print("    [FAIL] ci_build_apk.sh 构建前没校验 p4a 补丁标记：补丁没打上时"
+                  "会照常构建，然后又栽在 pip 混装上")
+            fails.append("缺补丁校验")
+        else:
+            print("    OK  构建前会校验 p4a 补丁标记")
 
     # ---- [7] venv 修复用的 find 写法 ----
     print("\n[7] 修复脚本的 venv 清理写法与约束校验")

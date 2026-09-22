@@ -35,6 +35,8 @@ on:
       - "iqdsp.py"
       - "buildozer.spec"
       - "ci_build_apk.sh"
+      - "prepare_p4a.sh"
+      - "patch_p4a_pip.py"
       - ".github/workflows/**"
   workflow_dispatch:            # 也支持手动点按钮触发
 
