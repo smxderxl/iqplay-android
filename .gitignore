@@ -29,7 +29,9 @@
 !patch_p4a_pip.py
 !安卓版使用说明.md
 !打包APK操作指引.md
+!推送操作指引.md
 !打包APK.sh
+!一键推送到GitHub.bat
 
 # ---- 抽取脚本：算法层的唯一来源，必须留（否则改了桌面版没法同步） ----
 !_extract_dsp.py

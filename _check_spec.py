@@ -245,6 +245,41 @@ def main():
         else:
             print("    OK  构建前会校验 p4a 补丁标记")
 
+    # 设了 p4a.source_dir 之后，任何"直接跑 buildozer"的入口都会在
+    # "Path for p4a.source_dir does not exist" 上直接失败。
+    # 本项目的本地入口是 打包APK.sh —— 它必须转交 ci_build_apk.sh（或至少
+    # 先调 prepare_p4a.sh）。
+    if src_dir:
+        # 先按原名找，找不到再试全小写（Windows 上两个名字会指向同一文件，
+        # 不去重会打两条一样的消息）
+        entries = []
+        for entry in ("打包APK.sh", "打包apk.sh"):
+            p = os.path.join(_HERE, entry)
+            if os.path.exists(p) and not any(
+                    os.path.normcase(os.path.realpath(p)) ==
+                    os.path.normcase(os.path.realpath(q)) for q in entries):
+                entries.append(p)
+        for p in entries:
+            entry = os.path.basename(p)
+            # ⚠️ 必须按"真正的调用形式"判断，不能全文匹配名字：
+            #   脚本头注释里解释着 prepare_p4a.sh，echo 的错误提示里也提到它 ——
+            #   这两种都会被误判成"已调用"（本脚本已第三次踩同类坑）。
+            # 只认行首带 bash / sh / source / . 的调用行。
+            body = open(p, encoding="utf-8").read()
+            invoked = re.search(
+                r"^\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*"
+                r"(?:bash|sh|source|\.)\s+\S*(?:prepare_p4a|ci_build_apk)",
+                body, re.M,
+            )
+            if invoked:
+                print(f"    OK  {entry}（本地构建入口）会准备 p4a："
+                      f"{invoked.group(0).strip()}")
+            else:
+                print(f"    [FAIL] {entry} 直接跑 buildozer 却没准备 p4a：spec 设了"
+                      " p4a.source_dir，目录不存在时 buildozer 会报"
+                      " \"Path for p4a.source_dir does not exist\" 直接失败")
+                fails.append("本地入口缺 p4a 准备")
+
     # ---- [7] venv 修复用的 find 写法 ----
     print("\n[7] 修复脚本的 venv 清理写法与约束校验")
     if not os.path.exists(CI_SCRIPT):

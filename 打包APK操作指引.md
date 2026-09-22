@@ -33,20 +33,24 @@ git push -u origin main
 > 别用账号密码（GitHub 早就不支持了）。
 
 本机已完成的准备工作（不用你管）：
-- `git init` + 首次 commit（9 个文件）
+- `git init` + 分多次 commit（源码 + 云端构建配置 + 两个准备脚本）
 - `.gitignore`：**默认忽略一切，只放行打 APK 必需的文件**
   —— 所以那几百 MB 的 `.cs16` 和几十个无关 `.py` 不会被传上去
-- `.gitattributes`：锁定 `*.sh` / `*.yml` 为 LF 换行
+- `.gitattributes`：锁定 `*.sh` / `*.yml` / `*.py` 为 LF 换行
   （Windows 的 CRLF 到 Linux 上会让脚本报 `bad interpreter`）
+- `prepare_p4a.sh` + `patch_p4a_pip.py`：构建前把 python-for-android 克隆到
+  指定的 release tag，并给它打一个 pip 加固补丁（不这么做会在编译早期报
+  `ImportError: cannot import name 'open_rich_spinner' / 'RequirementInformation'`）
 
 ## 三、等云端自动构建
 
 push 完成后：
 
 1. 打开仓库页面 → 顶部 **Actions** 标签
-2. 会看到一条 **"IQ 信号综合分析仪 · 安卓版（Kivy）"** 正在跑（黄点）
-3. 点进去可以看实时日志。**首次约 20~30 分钟**（要拉 Kivy 镜像 +
-   编译 numpy/python-for-android；之后有缓存会快很多，约 10 分钟）
+2. 会看到一条 **"Build Android APK"** 正在跑（黄点）
+3. 点进去可以看实时日志。**首次约 20~40 分钟**（要装系统依赖 + 下载
+   Android SDK/NDK + 完整编译 hostpython3 / python3 / numpy；
+   之后有缓存会快很多）
 4. 跑完变成绿勾 ✅
 
 > 想手动重跑：Actions → 左侧 "Build Android APK" → 右侧 **Run workflow** 按钮。
@@ -80,7 +84,9 @@ push 完成后：
 | 现象 | 原因 / 处理 |
 |---|---|
 | Actions 里没有 workflow 跑 | 确认 `.github/workflows/build-apk.yml` 推上去了（`git ls-files .github` 能看到） |
-| 构建失败在 "构建 APK" 这步 | 把页面日志里的报错段发我；常见是 kivy 版本与 numpy 的 ABI 冲突，调整 `buildozer.spec` 的 `requirements` 即可 |
+| 构建失败在 "构建 APK" 这步 | 把**报错行往上 30~60 行的日志**发我。**不要急着改 `requirements`**：日志里那批 `No matching distribution found for numpy==2.2.6 / pyjnius==1.7.0 / kivy==2.3.0` 是 p4a 的**探针噪音**（它用 `--dry-run --only-binary=:all:` 试探有没有现成 wheel，异常被 `except` 吞掉后继续），不是失败原因 |
+| 日志里看不到 `===== [prepare_p4a] tag = ... =====` | 跑的还是旧版代码（改动没推上去）。看到什么报错都不能说明新方案有问题，先把最新 commit 推上去 |
+| 报 `Path for p4a.source_dir does not exist` | p4a 没准备好。**不要直接跑 `buildozer android debug`**，改用 `bash 打包APK.sh`（它会先跑 `prepare_p4a.sh`） |
 | 装完打开闪退 | 抓真机日志：手机开 USB 调试，或把 APK 里那个 `build.log` 发我；大概率是缺少中文字体或权限 |
 | 界面汉字是方框 | 手机没有 NotoSansCJK 字体。把任意中文字体改名 `font.ttf` 放到 `E:\b210chegnxu\`，重新 push 触发构建即可 |
 | 想改功能后重新出包 | 改 `iqplay_android.py` → `git add -A && git commit -m "改了什么" && git push`，云端自动重打 |
