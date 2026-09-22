@@ -1,14 +1,28 @@
 # ---------------------------------------------------------------------------
-# 云端打安卓 APK（GitHub Actions）
+# 云端打安卓 APK（GitHub Actions）—— 直接在 runner 上用 pip 装 buildozer
 #
-# 为什么走云：buildozer 只能跑在 Linux 上，本机是 Windows 且 WSL 被策略拦住。
-# 这里用 kivy 官方维护的 buildozer 镜像——里面已经预装 Android SDK/NDK，
-# 比从零下载（3~5 GB）快很多。
+# 为什么不再用 kivy/buildozer 那个 Docker 镜像：
+#   镜像内的基础 python 环境出过一连串底层故障（pip 模块混装导致
+#   open_rich_spinner / RequirementInformation 报错，之后又出现
+#   `/usr/local/bin/python: No module named venv`）。改成在 runner 上自己
+#   装一套受控环境，可复现性更好。
+#
+# 关键点（每条都对应一次真实踩过的坑）：
+#   1. 必须用 actions/setup-python 显式指定 3.11 —— 不能用 runner 默认的
+#      python（太新，p4a 交叉编译会炸）。
+#   2. apt 依赖照抄 p4a 官方 Dockerfile，但**去掉 libtinfo5**
+#      （ubuntu 24.04 已无此包，照抄老文档会 apt 报错），并保留
+#      python3-venv（否则 p4a 建 venv 时报 "No module named venv"）。
+#   3. **不要** pip install python-for-android —— buildozer 是自己去 git
+#      clone p4a 的（buildozer/targets/android.py: p4a.url + p4a.branch），
+#      pip 上那个包根本不会被用到。要锁 p4a 版本请改 buildozer.spec 的
+#      p4a.branch（buildozer 会 `git fetch --tags` + `git checkout`，tag 可用）。
+#   4. PIP_CONSTRAINT 钉住 pip，避免 p4a 内部 `pip install -U pip` 装出
+#      "模块混装"的 pip。
 #
 # 用法：
-#   1) 把仓库推到 GitHub
-#   2) 到 Actions 页面点 "Build Android APK" -> Run workflow（或直接 push 触发）
-#   3) 跑完在页面底部 Artifacts 里下载 apk 压缩包
+#   推到 GitHub 后在 Actions 页面点 "Build Android APK" -> Run workflow，
+#   跑完在页面底部 Artifacts 里下载 apk 压缩包。
 # ---------------------------------------------------------------------------
 name: Build Android APK
 
@@ -20,34 +34,68 @@ on:
       - "iqplay_android.py"
       - "iqdsp.py"
       - "buildozer.spec"
-      - ".github/workflows/**"
       - "ci_build_apk.sh"
+      - ".github/workflows/**"
   workflow_dispatch:            # 也支持手动点按钮触发
-
-env:
-  # 镜像锁到 digest，不用 latest —— latest 会静默换掉里面的 python/pip 组合，
-  # 同一个 commit 今天能过、明天就挂（我们已经被它坑过一次）。
-  #
-  # 想升级镜像时执行下面这行拿到新 digest，替换 IMAGE 的值即可：
-  #   docker pull ghcr.io/kivy/buildozer:latest && docker inspect \
-  #     --format='{{index .RepoDigests 0}}' ghcr.io/kivy/buildozer:latest
-  IMAGE: "ghcr.io/kivy/buildozer@sha256:d5b9d1b5e3241fc6ec8eb78b8ecff9e975054645e26c07075c0a60d18c471c1f"
-  # p4a 会往它自己创建的 build venv 里 `pip install -U pip`，而"升级"过程会
-  # 留下模块混装的 pip（新版 main.py + 旧版 spinners.py），导致
-  #   ImportError: cannot import name 'open_rich_spinner' from
-  #   'pip._internal.cli.spinners'
-  # 该 API 是 pip 25.2 才引入的。这里用约束文件把版本钉死，让所有 pip 调用
-  # （包括 p4a 内部那次）都装出同一份完整的 wheel。
-  PIP_PIN: "25.2"
 
 jobs:
   build-apk:
     name: 构建 debug APK
     runs-on: ubuntu-latest
+    env:
+      # 把 p4a 自建 build/venv 里的 pip 钉死（预防模块混装）
+      PIP_PIN: "25.2"
+      # buildozer 的构建目录（干净暂存目录，见"准备干净构建目录"步骤）
+      APP_DIR: "_apk_stage"
 
     steps:
       - name: 取出源码
         uses: actions/checkout@v4
+
+      # ⚠️ 关键：显式用 Python 3.11。runner 默认 python 版本较新，
+      # 与 p4a/NDK 25b 的交叉编译不兼容。
+      - name: 准备 Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # 依赖清单来自 p4a 官方 Dockerfile（pythonforandroid/Dockerfile）。
+      # 已按 ubuntu-24.04 校对：
+      #   - 删掉 libtinfo5（noble 里不存在，写了会 apt 失败）
+      #   - 保留 python3-venv（对应 "No module named venv"）
+      - name: 安装系统依赖
+        run: |
+          set -e
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ant autoconf automake autopoint ccache cmake \
+            g++ gcc git lbzip2 libffi-dev libltdl-dev libtool libssl-dev \
+            make openjdk-17-jdk patch pkg-config \
+            python3-dev python3-pip python3-venv \
+            unzip wget zip ca-certificates
+          echo "== 版本自检 =="
+          python3 --version
+          java -version 2>&1 | head -2
+
+      - name: 指定 JDK 17
+        run: |
+          if [ -d /usr/lib/jvm/java-17-openjdk-amd64 ]; then
+            echo "JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64" >> "$GITHUB_ENV"
+            echo "已设置 JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64"
+          else
+            echo "警告：没找到 java-17-openjdk-amd64，交给 buildozer 自动探测"
+            ls -d /usr/lib/jvm/* || true
+          fi
+
+      - name: 安装 buildozer
+        run: |
+          set -e
+          python -m pip install --upgrade pip setuptools wheel
+          # 只装 buildozer；p4a 由 buildozer 自己 git clone（见文件头说明 3）
+          python -m pip install "cython<3" "buildozer==1.6.0"
+          echo "== 自检 =="
+          python -c "import buildozer, sys; print('buildozer ok, python', sys.version)"
+          buildozer --version
 
       # buildozer 会把 source.dir **整个**打包，而本仓库里还有别的文件。
       # 先把该进包的东西拷进一个干净目录，避免混入无关文件。
@@ -79,39 +127,18 @@ jobs:
           echo "已清空 _apk_stage/.buildozer（SDK/NDK 保留）"
 
       # 只缓存 SDK/NDK（~/.buildozer），不再缓存整个构建目录。
+      # key 抬到 v3：构建方式从 Docker 换成 runner 直装，旧缓存不再适用。
       - name: 复用 SDK/NDK 缓存
         uses: actions/cache@v4
         with:
           path: |
             ~/.buildozer
-          key: sdk-ndk-v2-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
+          key: sdk-ndk-v3-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
           restore-keys: |
-            sdk-ndk-v2-${{ runner.os }}-
+            sdk-ndk-v3-${{ runner.os }}-
 
       - name: 构建 APK
-        run: |
-          set -e
-          cd _apk_stage
-
-          # 用 kivy 官方镜像：已内置 Android SDK / NDK / buildozer 依赖。
-          #
-          # 这里替换掉镜像默认的 entrypoint，改跑我们的 ci_build_apk.sh：
-          #   1) 先设 PIP_CONSTRAINT 把 pip 钉到 PIP_PIN（预防模块混装）
-          #   2) 跑一次 buildozer
-          #   3) 若失败，逐个修复 .buildozer 里 p4a 建的 venv（用 venv 自己的
-          #      python 执行 pip，而不是容器里无关的系统 pip），然后重试一次
-          #
-          # 脚本挂在 /ci_build_apk.sh（在 /home/user 之外）。不能挂到 /home/user
-          # 里面：官方 entrypoint.sh 会 `chown --recursive /home/user`，碰到只读
-          # 挂载会报错，而它开头就是 `set -euo pipefail`，整条构建会直接中断。
-          docker run --rm \
-            -v "$PWD":/home/user/hostcwd \
-            -v "$HOME/.buildozer":/home/user/.buildozer \
-            -v "$GITHUB_WORKSPACE/ci_build_apk.sh":/ci_build_apk.sh:ro \
-            -e PIP_PIN="$PIP_PIN" \
-            --entrypoint /bin/bash \
-            "$IMAGE" \
-            -c "bash /ci_build_apk.sh"
+        run: bash ci_build_apk.sh
 
       - name: 收集产物
         run: |
@@ -121,8 +148,10 @@ jobs:
           mkdir -p apk-out
           find _apk_stage -name "*.apk" -type f -exec cp {} apk-out/ \;
           # 顺手把构建日志也带上，方便排查真机问题
-          [ -f _apk_stage/.buildozer/android/platform/build-arm64-v8a_armeabi-v7a/build.log ] \
-            && cp _apk_stage/.buildozer/android/platform/build-arm64-v8a_armeabi-v7a/build.log apk-out/ || true
+          for lg in _apk_stage/.buildozer/android/platform/build-*/build.log; do
+            [ -f "$lg" ] && cp "$lg" apk-out/ || true
+          done
+          ls -la apk-out
 
       - name: 上传 APK
         uses: actions/upload-artifact@v4

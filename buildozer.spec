@@ -68,9 +68,18 @@ android.skip_update = False
 
 # 不要用 stable 分支！它多年没更新了：numpy recipe 还停在 1.9.2（pypi.python.org
 # 的老地址），连 python3 / hostpython3 recipe 都不存在，一用就崩。
-# master / develop 的 recipe 默认值会随时间漂移（python3 曾默认 3.14.2、
-# numpy 曾默认 v2.3.0），所以下面 requirements 里该锁的都必须锁死。
-p4a.branch = master
+#
+# 锁到**具体 tag**而不用 master：master 的 recipe 默认值会随时间漂移
+# （python3 曾默认 3.14.2、numpy 曾默认 v2.3.0），同一个 commit 今天能过、
+# 明天可能就挂。v2026.05.09 是本项目验证过的写法组合：
+#   python3  recipe: version 3.14.2, url = cpython github tarball v{version}
+#   numpy    recipe: version v2.3.0,  url = git+https://github.com/numpy/numpy
+# 两者与我们下面 requirements 的写法规则一致（python3 不带 v、numpy 带 v）。
+# 说明：buildozer 是通过 p4a.branch 去 git clone p4a 的
+#       （targets/android.py: p4a.url / p4a.branch），
+#       所以 pip 上的 python-for-android 包根本不会被用到，别去 pip 装它。
+#       buildozer 用 `git fetch --tags` + `git checkout`，因此 tag 可以写在这里。
+p4a.branch = v2026.05.09
 
 # 读 IQ 文件 / 导出 WAV·PNG 需要存储权限
 android.permissions = READ_EXTERNAL_STORAGE,WRITE_EXTERNAL_STORAGE,MANAGE_EXTERNAL_STORAGE

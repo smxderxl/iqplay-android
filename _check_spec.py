@@ -12,12 +12,17 @@ buildozer.spec 静态检查 —— 专查本项目在云端构建时真实踩过
       否则 "python3 should have same version as hostpython3, X != Y"
   [3] numpy 版本写法必须带 'v'（git tag），python3 不能带 'v'（tarball）
   [4] requirements 里不能写裸的 'android'
-  [5] workflow 里的 docker 镜像必须锁 digest（不能用 :latest，它会静默换
-      掉镜像内的 python/pip 组合，同一个 commit 今天能过、明天就挂）
-  [6] 修复 venv 的 find 表达式：venv 的 bin/python 是**符号链接**，
+  [5] workflow 的构建环境：必须用 actions/setup-python 固定 3.11（runner 默认
+      python 太新，p4a 交叉编译会炸）；apt 列表不能含 libtinfo5（ubuntu 24.04
+      已无此包）；不要 pip install python-for-android —— buildozer 是
+      `p4a.url` + `p4a.branch` 去 git clone p4a，pip 那个包根本不会被用到
+  [6] p4a.branch 必须锁到具体 release tag（master/develop 的 recipe 默认值
+      会漂移，同一个 commit 今天能过明天可能挂）
+  [7] 修复脚本：venv 的 bin/python 是**符号链接**，
       用 `-type f -path '*/bin/python'` 会命中 0 个，必须按目录名找；
       并禁止按名字删 `build`（会删掉 $NDK/build）、禁止只做原地修 pip
-  [7] workflow 里对缓存目录（~/.buildozer）用 find 必须加 `|| true`：
+      （--force-reinstall 不会删除新版本里已不存在的旧文件，混装依旧）
+  [8] workflow 里对缓存目录（~/.buildozer）用 find 必须加 `|| true`：
       冷缓存时目录不存在，find 返回非 0 会让该步骤直接失败
 """
 import configparser
@@ -113,27 +118,61 @@ def main():
     else:
         print("    OK")
 
-    # ---- [5] workflow 镜像锁 digest ----
-    print("\n[5] workflow 的 docker 镜像是否锁 digest（不能用 :latest）")
+    # ---- [5] workflow 的构建环境 ----
+    print("\n[5] workflow 的构建环境（Python 版本 / 依赖 / 不装 p4a）")
     if not os.path.exists(WORKFLOW):
         print("    [FAIL] 找不到 .github/workflows/build-apk.yml")
         fails.append("workflow 缺失")
     else:
         wf = open(WORKFLOW, encoding="utf-8").read()
-        # 去掉注释行再检查：注释里会写 "ghcr.io/kivy/buildozer:latest" 这种
-        # 升级示例，不剔除就会把示例当成真实引用（这个坑本脚本自己踩过一次）
+        # 去掉注释行再检查：注释里会写 "ghcr.io/kivy/buildozer:latest"、
+        # "libtinfo5" 之类的反例说明，不剔除会把示例当成真实引用
+        # （本脚本自己踩过两次）
         code = "\n".join(l for l in wf.splitlines()
                          if not l.strip().startswith("#"))
-        pinned = re.findall(r"[\w./-]+@sha256:[0-9a-f]{64}", code)
-        mut = re.findall(r"(?:ghcr\.io/)?kivy/buildozer:([a-zA-Z0-9._-]+)", code)
-        if mut:
-            print(f"    [FAIL] 用了可变标签: {sorted(set(mut))} -- 锁到 @sha256:... 才行")
-            fails.append("镜像未锁 digest")
-        elif pinned:
-            print(f"    OK  已锁 digest: {pinned[0][:64]}...")
+
+        # 必须显式用 setup-python 指定 3.11，不能用 runner 默认 python
+        if "actions/setup-python" not in code:
+            print("    [FAIL] 没有 actions/setup-python：会用 runner 默认 python"
+                  "（版本过新，p4a 交叉编译会炸）")
+            fails.append("未固定 python 版本")
+        elif re.search(r"python-version:\s*[\"']?3\.11", code):
+            print("    OK  用 actions/setup-python 固定了 3.11")
         else:
-            print("    [FAIL] workflow 里没找到任何 @sha256: 形式的镜像引用")
-            fails.append("镜像未锁 digest")
+            print("    [FAIL] setup-python 里没写 python-version: '3.11'")
+            fails.append("未固定 3.11")
+
+        # 不应再依赖可变 docker 镜像
+        if re.search(r"(?:ghcr\.io/)?kivy/buildozer", code):
+            print("    [FAIL] 又用上 kivy/buildozer 镜像了（该镜像底层环境出过"
+                  "一连串问题；如确实要用，必须锁 @sha256 digest）")
+            fails.append("用了未受控的 docker 镜像")
+
+        # 不要 pip install python-for-android：buildozer 自己 git clone p4a
+        if re.search(r"pip install[^\n]*python-for-android", code):
+            print("    [FAIL] pip install python-for-android 是无效的：buildozer 用"
+                  " p4a.url/p4a.branch 自己 git clone，pip 那个包不会被用到。"
+                  "要锁 p4a 版本请改 buildozer.spec 的 p4a.branch")
+            fails.append("无效的 pip install p4a")
+
+        # apt 依赖：libtinfo5 在 ubuntu 24.04 已不存在。
+        # 注意要按「词边界」匹配——apt 列表是把包名内联写在一行里的
+        # （如 `g++ gcc git lbzip2`），只匹配独占一行会漏掉。
+        if re.search(r"(?<![\w.-])libtinfo5(?![\w.-])", code):
+            print("    [FAIL] apt 列表里有 libtinfo5：ubuntu 24.04(noble) 已无此包，"
+                  "apt 会直接失败（该用 libtinfo6 或不需要）")
+            fails.append("apt 含 libtinfo5")
+        else:
+            print("    OK  apt 列表没有 libtinfo5")
+
+        # python3-venv 缺失会让 p4a 建 venv 时报 "No module named venv"
+        if not re.search(r"(?<![\w.-])python3-venv(?![\w.-])", code):
+            print("    [FAIL] apt 列表里没有 python3-venv：p4a 建 venv 时会报"
+                  " \"No module named venv\"")
+            fails.append("apt 缺 python3-venv")
+        else:
+            print("    OK  apt 列表含 python3-venv")
+
         if "PIP_CONSTRAINT" not in wf and "PIP_CONSTRAINT" not in (
                 open(CI_SCRIPT, encoding="utf-8").read() if os.path.exists(CI_SCRIPT) else ""):
             print("    [FAIL] 没有任何 PIP_CONSTRAINT 兜住 p4a 内部的 pip 升级")
@@ -141,8 +180,24 @@ def main():
         else:
             print("    OK  有 PIP_CONSTRAINT 钉住 pip 版本")
 
-    # ---- [6] venv 修复用的 find 写法 ----
-    print("\n[6] 修复脚本的 venv 清理写法与约束校验")
+    # ---- [6] p4a.branch 要锁到具体 tag ----
+    print("\n[6] p4a.branch 不能是漂移分支")
+    branch = (app.get("p4a.branch") or "").strip()
+    if not branch:
+        print("    [WARN] 没写 p4a.branch，buildozer 会用默认 master（会漂移）")
+    elif branch in ("master", "develop", "stable", "main"):
+        print(f"    [FAIL] p4a.branch = {branch} 是会漂移的分支；recipe 默认值会变"
+              "（python3 曾默认 3.14.2、numpy 曾默认 v2.3.0），同一个 commit"
+              "今天能过明天可能挂。锁到具体 tag（如 v2026.05.09）")
+        fails.append("p4a.branch 未锁 tag")
+    elif not re.match(r"^v?\d{4}\.\d{2}\.\d{2}", branch):
+        print(f"    [WARN] p4a.branch = {branch} 看着不像 p4a 的 release tag"
+              "（形如 v2026.05.09）")
+    else:
+        print(f"    OK  已锁到 tag: {branch}")
+
+    # ---- [7] venv 修复用的 find 写法 ----
+    print("\n[7] 修复脚本的 venv 清理写法与约束校验")
     if not os.path.exists(CI_SCRIPT):
         print("    [FAIL] 找不到 ci_build_apk.sh")
         fails.append("修复脚本缺失")
@@ -192,7 +247,7 @@ def main():
     # 注：ci_build_apk.sh 刻意不开 `set -e`（第一轮失败后要接着重试），
     # 所以 process substitution 里的 find 失败不会中断；真正需要 `|| true`
     # 的是 workflow 里那步（那里出错会让整个 job 失败）。
-    print("\n[7] workflow 清理步骤对缓存目录 find 的容错")
+    print("\n[8] workflow 清理步骤对缓存目录 find 的容错")
     if not os.path.exists(WORKFLOW):
         print("    [FAIL] 找不到 workflow")
         fails.append("workflow 缺失")
