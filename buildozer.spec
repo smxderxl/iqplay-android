@@ -44,9 +44,13 @@ version = 3.2
 #    所以必须写 v2.2.6；写成 2.2.6 会 checkout 失败
 #    （recipe.py 的 get_pip_name() 会自动 lstrip('v')，转成 pip 的 numpy==2.2.6）
 #
+#  - hostpython3 也必须写成同一个版本！它的 downloads 里有硬性守卫：
+#      recipe.py: if python_recipe.version != self.version: raise
+#      "python3 should have same version as hostpython3, X != Y"
+#    两边都默认是 3.14.2，只改 python3 会直接构建失败（p4a 官方 issue #2568 同款）
 #  - 不要写裸的 `android`：它在 p4a 里不是独立 recipe 名，写了会构建失败
 #  - pyjnius 用于 Toast / 权限申请，会被 kivy 的 android 依赖自动带上
-requirements = python3==3.11.9,kivy==2.3.0,numpy==v2.2.6,pyjnius
+requirements = python3==3.11.9,hostpython3==3.11.9,kivy==2.3.0,numpy==v2.2.6,pyjnius
 
 orientation = portrait
 # 留状态栏，避免刘海遮住顶部工具条
