@@ -1506,7 +1506,39 @@ class ModPage(PageBase):
 # ======================================================================
 IQ_EXT = (".cs16", ".c16", ".cf32", ".cfile", ".complex", ".cu8", ".cs8",
           ".wav", ".bin", ".iq", ".dat")
-NO_EXT_MAX = 400 << 20          # 无扩展名文件只显示小于 400MB 的（signalwave 那种）
+
+# 明确属于"非 IQ 数据"的扩展名：文件浏览器默认隐藏这些，免得一屏全是
+# 图片 / 文档 / 侧车 xml（signalwave 目录里就有 272 个同名 .xml）。
+# 判据是"黑名单"而不是"白名单"—— 见 looks_like_iq() 的说明。
+NON_IQ_EXT = {
+    ".xml", ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".ico", ".svg",
+    ".txt", ".md", ".rst", ".log", ".ini", ".cfg", ".conf", ".yaml", ".yml",
+    ".json", ".csv", ".tsv", ".xls", ".xlsx", ".doc", ".docx", ".ppt", ".pptx",
+    ".pdf", ".zip", ".rar", ".7z", ".gz", ".tar", ".apk", ".jar", ".so",
+    ".py", ".pyc", ".pyo", ".pyd", ".sh", ".bat", ".cmd", ".exe", ".dll",
+    ".ttf", ".ttc", ".otf", ".mp3", ".mp4", ".avi", ".mkv", ".mov", ".flac",
+    ".m4a", ".ogg", ".db", ".sqlite", ".html", ".htm", ".bak",
+    ".spec", ".toml", ".lock", ".patch", ".diff", ".in", ".asc", ".sig",
+}
+
+
+def looks_like_iq(name):
+    """这个文件名看起来像不像 IQ 数据文件？（文件浏览器的过滤器用）
+
+    ⚠️ 不能用 `os.path.splitext(name)[1] == ""` 来判"有没有扩展名"：
+    signalwave 里的素材名形如 `16psk_25k_24.3k_0.1`、`2fsk_12.7k_4k`，
+    **名字里本身就带点**（带宽 24.3k、滚降 0.1），splitext 会取出
+    '.1' / '.7k_4k' 这种"假扩展名"，于是这些真波形全被当成"别的文件"隐藏掉。
+    实测：那个目录 547 个文件，旧逻辑只能显示 135 个，**412 个看不见**。
+
+    所以改成黑名单：扩展名明确属于非 IQ 类型才隐藏，其余一律当作可能的 IQ 文件。
+    目录不受影响（Kivy 的 filter_dirs 默认 False，目录始终显示）。
+    """
+    ext = os.path.splitext(str(name))[1].lower()
+    if ext in IQ_EXT:
+        return True
+    return ext not in NON_IQ_EXT
+
 
 
 class FileBrowser(Popup):
@@ -1528,6 +1560,10 @@ class FileBrowser(Popup):
                                       filters=self._filters(),
                                       size_hint=(1, 1))
         self.fc.bind(on_submit=self._submit)
+        self._tune_scrollbars(self.fc)
+        # 再绑一次 on_open：KV 里的子控件在个别 Kivy 版本上要等布局时才建齐，
+        # 那时再调一遍是幂等的，不会有害。
+        self.bind(on_open=lambda *_: self._tune_scrollbars(self.fc))
         root.add_widget(self.fc)
         self.lb_path = Label(text=self.fc.path, color=C_DIM, font_size=dp(10),
                              size_hint_y=None, height=dp(20), halign="left")
@@ -1545,16 +1581,45 @@ class FileBrowser(Popup):
     def _filters(self):
         if self.show_all:
             return ["*"]
-        return ["*" + e for e in IQ_EXT] + [
-            lambda folder, name: os.path.splitext(name)[1] == ""
-            and self._small(os.path.join(folder, name))]
+        return [lambda folder, name: looks_like_iq(name)]
 
     @staticmethod
-    def _small(path):
-        try:
-            return os.path.getsize(path) <= NO_EXT_MAX
-        except Exception:
-            return False
+    def _tune_scrollbars(root):
+        """把 FileChooser 内部那个 ScrollView 的滚动条改成"手指拖得动"的。
+
+        实测（Kivy 2.3 的 kivy/data/style.kv 里 <FileChooserListLayout>）：
+        内部 ScrollView 用的是**默认值**——`scroll_type=['content']`、
+        `bar_width='2dp'`。于是：
+          · Kivy 文档写明：scroll_type 为 ['content'] 时"只能拖动内容"，
+            要含 'bars'（即 ['bars','content']）才能靠**拖滚动条本身**来滚。
+            默认不含 'bars' —— 所以手指按在右侧滑块上完全没反应。
+          · bar_width 默认 2dp，在手机上就是一根头发丝，根本按不中。
+        这里把最外层那个 ScrollView 改成 22dp 宽、常显（半透明）、可拖。
+        BFS 保证先遇到最外层（真正的滚动容器），只改那一个。
+        返回被改的 ScrollView（找不到返回 None，便于测试断言）。
+        """
+        from collections import deque
+        from kivy.uix.scrollview import ScrollView
+        q = deque([root])
+        seen = 0
+        while q and seen < 800:                 # 防御：别在异常树上死循环
+            w = q.popleft()
+            seen += 1
+            if isinstance(w, ScrollView):
+                try:
+                    w.scroll_type = ["bars", "content"]
+                    w.bar_width = dp(22)
+                    w.bar_margin = dp(2)
+                    w.bar_color = (1.0, 1.0, 1.0, 0.80)
+                    w.bar_inactive_color = (1.0, 1.0, 1.0, 0.40)
+                except Exception:
+                    return None
+                return w
+            try:
+                q.extend(w.children)
+            except Exception:
+                pass
+        return None
 
     def _toggle_all(self):
         self.show_all = not self.show_all
