@@ -35,6 +35,10 @@
 
 # ---- 抽取脚本：算法层的唯一来源，必须留（否则改了桌面版没法同步） ----
 !_extract_dsp.py
+# ---- IQ生成器 安卓版：算法层 / 界面 / 抽取脚本 ----
+!iqgen_dsp.py
+!iqgen_android.py
+!_extract_iqgen.py
 
 # ---- 打包配置静态检查：改 buildozer.spec 后先跑它，能挡住踩过的坑 ----
 !_check_spec.py
