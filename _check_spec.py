@@ -31,6 +31,10 @@ buildozer.spec 静态检查 —— 专查本项目在云端构建时真实踩过
       一次构建会在三个路径各留一份**完全相同**的 apk（gradle 原始输出 /
       p4a 的 _finish_package 复制到它工作目录的带版本副本 / bin 下的最终产物），
       artifact 解压后出现 3 个 apk，用户不知道装哪个
+  [10] 并发与行尾：workflow 要有 concurrency（否则连续 push 会排队跑多次
+      20~40 分钟的构建）；.gitattributes 必须存在、必须含 eol=lf，
+      **且必须被 .gitignore 放行**（"默认忽略一切"的写法会把它自己吞掉，
+      于是锁 LF 等于没做 —— 本项目真中过）
 """
 import configparser
 import os
@@ -380,6 +384,39 @@ def main():
         else:
             print("    [WARN] artifact 名里没有短哈希：多次构建下载下来文件名相同，"
                   "不好分辨是哪次的")
+
+    # ---- [10] 并发控制与行尾策略 ----
+    print("\n[10] 并发控制与行尾（CRLF）策略")
+    if os.path.exists(WORKFLOW):
+        wf = open(WORKFLOW, encoding="utf-8").read()
+        code = "\n".join(l for l in wf.splitlines()
+                         if not l.lstrip().startswith("#"))
+        if re.search(r"^concurrency:", code, re.M):
+            print("    OK  有 concurrency 控制（连续 push 时只跑最新一次构建）")
+        else:
+            print("    [WARN] workflow 没有 concurrency：连续 push 会排队跑多次"
+                  " 20~40 分钟的构建，多数在跑过时版本")
+    ga = os.path.join(_HERE, ".gitattributes")
+    if not os.path.exists(ga):
+        print("    [WARN] 没有 .gitattributes：Windows 工作区的 CRLF 会让 shell 脚本"
+              " 到 Linux 上报 bad interpreter: /usr/bin/env bash^M")
+    else:
+        body = open(ga, encoding="utf-8").read()
+        if "eol=lf" not in body:
+            print("    [FAIL] .gitattributes 里没有 eol=lf：等于没锁 LF")
+            fails.append(".gitattributes 没锁 LF")
+        else:
+            gi = os.path.join(_HERE, ".gitignore")
+            gtxt = (open(gi, encoding="utf-8").read()
+                    if os.path.exists(gi) else "")
+            # 光有文件不够：它自己也会被"默认忽略一切"的 .gitignore 吞掉
+            if re.search(r"^\*", gtxt, re.M) and "!.gitattributes" not in gtxt:
+                print("    [FAIL] .gitignore 是'默认忽略一切'的写法，却没有"
+                      " !.gitattributes —— 该文件根本没进仓库，锁 LF 等于没做"
+                      "（本项目真中过这一枪）")
+                fails.append(".gitattributes 未放行")
+            else:
+                print("    OK  .gitattributes 锁了 LF，且未被 .gitignore 吞掉")
 
     # ---- 汇总 ----
     print("\n" + "=" * 46)

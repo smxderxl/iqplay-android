@@ -40,6 +40,12 @@ on:
       - ".github/workflows/**"
   workflow_dispatch:            # 也支持手动点按钮触发
 
+# 连续 push 会逐个触发构建，而一次构建要 20~40 分钟 —— 不限制的话会排队跑好几个
+# 早已过时的版本。这里让"同一个分支只保留最新一次构建"，新的 push 会取消旧的。
+concurrency:
+  group: apk-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-apk:
     name: 构建 debug APK
