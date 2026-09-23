@@ -1841,11 +1841,14 @@ def looks_like_iq(name, folder=None):
 
 
 class FileBrowser(Popup):
-    def __init__(self, app, on_pick, **kw):
+    def __init__(self, app, on_pick, dir_mode=False, **kw):
+        # dir_mode=True：不看扩展名、只选**目录**（IQ生成页用它挑素材目录）
         self.app = app
         self.on_pick = on_pick
-        self.show_all = False
-        super().__init__(title="选择 IQ 文件", size_hint=(0.96, 0.94),
+        self.dir_mode = dir_mode
+        self.show_all = dir_mode
+        super().__init__(title="选择目录" if dir_mode else "选择 IQ 文件",
+                         size_hint=(0.96, 0.94),
                          title_color=C_FG, separator_color=C_ACCENT, **kw)
         root = BoxLayout(orientation="vertical", spacing=dp(4), padding=dp(4))
         top = BoxLayout(size_hint_y=None, height=dp(34), spacing=dp(4))
@@ -1908,10 +1911,18 @@ class FileBrowser(Popup):
         if IS_ANDROID:
             bot.add_widget(tbtn("授权", self._grant, dp(56),
                                 bg=(0.45, 0.32, 0.15, 1)))
-        bot.add_widget(tbtn("载入", self._ok, dp(72), bg=(0.20, 0.45, 0.25, 1)))
+        if self.dir_mode:
+            # 选目录模式：主按钮变成"用此目录"，不需要点中某个文件
+            bot.add_widget(tbtn("用此目录", self._use_cur_dir, dp(76),
+                                bg=(0.20, 0.45, 0.25, 1)))
+        else:
+            bot.add_widget(tbtn("载入", self._ok, dp(72), bg=(0.20, 0.45, 0.25, 1)))
         root.add_widget(bot)
         self.content = root
         self._refresh_info()
+
+    def _use_cur_dir(self):
+        self._pick(self.fc.path)
 
     def _grant(self):
         """跳「所有文件访问权限」设置页（Android 11+ 读非媒体文件必需）。"""
@@ -2043,6 +2054,13 @@ class FileBrowser(Popup):
             toast("先点一个文件")
 
     def _pick(self, path):
+        if self.dir_mode:
+            if not os.path.isdir(path):
+                toast("这不是目录: %s" % path)
+                return
+            self.dismiss()
+            self.on_pick(path)
+            return
         if not os.path.isfile(path):
             toast("这不是文件: %s" % path)
             return
@@ -2054,7 +2072,7 @@ class FileBrowser(Popup):
 # 主界面
 # ======================================================================
 NAV = [("spectrum", "频谱"), ("waterfall", "瀑布"), ("persistence", "余晖"),
-       ("time", "时域"), ("mod", "调制")]
+       ("time", "时域"), ("mod", "调制"), ("iqgen", "IQ生成")]
 
 
 class RootWidget(BoxLayout):
@@ -2064,10 +2082,12 @@ class RootWidget(BoxLayout):
         self.add_widget(self._build_top())
         self.add_widget(self._build_ctrl())
         self.sm = ScreenManager(transition=NoTransition())
-        for key, title in NAV:
-            page = app.pages[key]
+        # 只挂**真正建好**的页：IQ生成页是延迟导入的，万一它在某个环境里加载失败，
+        # 不应该让整个界面崩掉（导航栏也跟着少一个按钮）。
+        self.nav_items = [(k, t) for k, t in NAV if k in app.pages]
+        for key, title in self.nav_items:
             scr = Screen(name=key)
-            scr.add_widget(page)
+            scr.add_widget(app.pages[key])
             self.sm.add_widget(scr)
         self.add_widget(self.sm)
         self.add_widget(self._build_nav())
@@ -2152,7 +2172,7 @@ class RootWidget(BoxLayout):
         row = BoxLayout(size_hint=(None, 1), spacing=dp(3), padding=(dp(4), dp(3)))
         row.bind(minimum_width=row.setter("width"))
         self.nav_btns = {}
-        for key, title in NAV:
+        for key, title in getattr(self, "nav_items", NAV):
             b = ToggleButton(text=title, group="nav", size_hint=(None, 1),
                              width=dp(58), font_size=dp(12), background_normal="",
                              background_color=BTN_BG if key != "spectrum"
@@ -2208,6 +2228,14 @@ class IQApp(App):
             "time": TimePage(self),
             "mod": ModPage(self),
         }
+        # IQ生成页放在单独文件里（iqgen_android.py），这里**延迟导入**：
+        # 该文件顶层会 `import iqplay_android as P` 复用本文件的控件工厂与绘图类，
+        # 只有在 iqplay_android 已经加载完之后 import 它才不会循环。
+        try:
+            from iqgen_android import IQGenPage
+            self.pages["iqgen"] = IQGenPage(self)
+        except Exception as e:                       # noqa: BLE001
+            print("IQ生成页加载失败: %s" % e)
         self.root_w = RootWidget(self)
         Clock.schedule_once(self._after_build, 0.3)
         return self.root_w

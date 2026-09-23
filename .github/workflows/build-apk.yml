@@ -33,6 +33,8 @@ on:
       - "main.py"
       - "iqplay_android.py"
       - "iqdsp.py"
+      - "iqgen_android.py"
+      - "iqgen_dsp.py"
       - "buildozer.spec"
       - "ci_build_apk.sh"
       - "prepare_p4a.sh"
@@ -111,7 +113,9 @@ jobs:
         run: |
           set -e
           mkdir -p _apk_stage
-          for f in main.py iqplay_android.py iqdsp.py buildozer.spec; do
+          # iqgen_android.py / iqgen_dsp.py 是「IQ生成」页（以及它的算法层）——
+          # 漏掉它们打出来的 APK 里就没有这一页（会静默降级成 5 个页签）。
+          for f in main.py iqplay_android.py iqdsp.py iqgen_android.py iqgen_dsp.py buildozer.spec; do
             if [ ! -f "$f" ]; then echo "缺少源文件: $f"; exit 1; fi
             cp "$f" _apk_stage/
           done
