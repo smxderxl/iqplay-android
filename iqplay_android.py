@@ -240,7 +240,16 @@ def default_work_dir():
 
 
 def ask_android_permissions():
-    """APK 环境请求存储权限；Pydroid 3 / Termux 下由宿主自己管权限。"""
+    """APK 环境请求存储权限；Pydroid 3 / Termux 下由宿主自己管权限。
+
+    ⚠️ 这里是**两个层次**，缺一不可：
+      · READ/WRITE_EXTERNAL_STORAGE —— 系统会弹窗申请，但在 **Android 11(API 30)
+        及以上，它对 .cs16 / 无扩展名这类"非媒体文件"是无效的**；
+      · MANAGE_EXTERNAL_STORAGE（"所有文件访问权限"）—— 读非媒体文件必须靠它，
+        而它**不能弹窗申请**，只能跳到系统设置页由用户手动打开。
+        没拿到它时 `os.listdir` 读不到目录内容（或只返回 App 自己的目录），
+        表现就是"文件浏览器里一个文件都没有"。
+    """
     if not IS_ANDROID:
         return
     try:
@@ -249,6 +258,72 @@ def ask_android_permissions():
                              Permission.WRITE_EXTERNAL_STORAGE])
     except Exception:
         pass
+    try:
+        ensure_all_files_access()
+    except Exception as e:
+        print("检查「所有文件访问权限」时出错: %s" % e)
+
+
+def has_all_files_access():
+    """当前有没有「所有文件访问权限」。Android 10 及以下恒为 True（不需要）。"""
+    if not IS_ANDROID:
+        return True
+    try:
+        from jnius import autoclass
+        if autoclass("android.os.Build$VERSION").SDK_INT < 30:
+            return True
+        return bool(autoclass("android.os.Environment").isExternalStorageManager())
+    except Exception:
+        return True          # 查不到就当有，别拦着用户
+
+
+def ensure_all_files_access(force=False):
+    """Android 11+ 跳到「所有文件访问权限」设置页，让用户手动打开。
+
+    force=True 时即便已授权也再跳一次（供界面上的「授权」按钮用：
+    用户换手机、重装、或想再确认一次时会用到）。
+    返回 True 表示已具备权限。
+    """
+    if not IS_ANDROID:
+        return True
+    try:
+        from jnius import autoclass
+        if autoclass("android.os.Build$VERSION").SDK_INT < 30:
+            return True
+        Environment = autoclass("android.os.Environment")
+        if Environment.isExternalStorageManager() and not force:
+            return True
+    except Exception as e:
+        print("查询存储权限失败: %s" % e)
+        return False
+
+    def _start(action, data_pkg):
+        from jnius import autoclass
+        PythonActivity = autoclass("org.kivy.android.PythonActivity")
+        Intent = autoclass("android.content.Intent")
+        Settings = autoclass("android.provider.Settings")
+        Uri = autoclass("android.net.Uri")
+        intent = Intent(action)
+        if data_pkg:
+            intent.setData(Uri.parse("package:" +
+                                     PythonActivity.mActivity.getPackageName()))
+        PythonActivity.mActivity.startActivity(intent)
+
+    try:
+        # 首选：直接跳到本应用的「所有文件访问权限」页
+        _start("android.settings.MANAGE_APP_ALL_FILES_ACCESS_PERMISSION", True)
+        toast("请在本页打开「允许访问所有文件」，然后返回本程序")
+        return False
+    except Exception as e:
+        print("跳转「所有文件访问权限」页失败: %s" % e)
+    try:
+        # 退而求其次：跳到应用详情页，用户自己在「权限」里找
+        _start("android.settings.APPLICATION_DETAILS_SETTINGS", True)
+        toast("请在「权限」里打开「所有文件访问权限」")
+    except Exception as e2:
+        print("跳转应用详情页也失败: %s" % e2)
+        toast("请到 系统设置→应用→本程序→权限 里打开「所有文件访问权限」")
+    return False
 
 
 def toast(msg):
@@ -1593,6 +1668,26 @@ class ModPage(PageBase):
 IQ_EXT = (".cs16", ".c16", ".cf32", ".cfile", ".complex", ".cu8", ".cs8",
           ".wav", ".bin", ".iq", ".dat")
 
+# 「明确不是 IQ 数据」的扩展名 —— 只在"连同名 xml 都查不到"时用来排除。
+# 这一层是**兜底**，不是主判据：手机上若拿不到「所有文件访问权限」，
+# os.listdir 读不到目录，同名 xml 反推就失效了（见 looks_like_iq 的说明）。
+NON_IQ_EXT = {
+    # 图片 / 文档 / 表格
+    ".xml", ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg", ".ico",
+    ".txt", ".md", ".rst", ".log", ".pdf", ".doc", ".docx", ".xls", ".xlsx",
+    ".ppt", ".pptx", ".csv", ".tsv", ".html", ".htm",
+    # 配置 / 代码 / 工程文件
+    ".ini", ".cfg", ".conf", ".yaml", ".yml", ".toml", ".json", ".spec",
+    ".lock", ".patch", ".diff", ".in", ".asc", ".sig", ".bak",
+    ".py", ".pyc", ".pyo", ".pyd", ".sh", ".bat", ".cmd", ".exe", ".dll",
+    ".so", ".jar", ".apk", ".aab", ".class", ".dex",
+    # 压缩包 / 字体 / 音视频
+    ".zip", ".rar", ".7z", ".gz", ".tar", ".bz2", ".xz",
+    ".ttf", ".ttc", ".otf", ".woff", ".woff2",
+    ".mp3", ".mp4", ".avi", ".mkv", ".mov", ".flac", ".m4a", ".ogg",
+    ".db", ".sqlite", ".sqlite3",
+}
+
 # 「从 xml 反推 IQ 文件名」的目录索引缓存：{绝对路径: (目录签名, 名字集合)}
 _XML_INDEX_CACHE = {}
 
@@ -1633,12 +1728,18 @@ def looks_like_iq(name, folder=None):
     """这个文件是不是 IQ 数据文件？（文件浏览器的过滤器用）
 
     判据按可靠性排序：
-      1) 同目录下存在 `<文件名>.xml` —— **确凿**：文件名就是从 xml 反推出来的；
+      1) 同目录下存在 `<文件名>.xml` —— **最权威**：文件名就是从 xml 反推出来的；
       2) 扩展名是明确的 IQ 格式（.cs16 / .cf32 / .wav …）；
       3) 完全没有扩展名 —— 原始 IQ 转储的常见形态；
-      4) 其余不算（想看全部就按界面上的「所有文件」）。
+      4) 兜底：扩展名**不在** NON_IQ_EXT（明确无关的）里就放行。
 
-    `folder` 传进来的就是 Kivy 过滤器给的当前目录；不传则只能靠 2)/3) 判断。
+    ⚠️ 第 4 条这层兜底不能省。原因：手机上（Android 11+）如果没拿到
+    「所有文件访问权限」，`os.listdir` 读不到目录内容 → 第 1 条的 xml 反推直接失效。
+    此时若仍按"只认已知 IQ 后缀"来判，`16psk_25k_24.3k_0.1` 这类名字
+    （`splitext` 取到假后缀 `'.1'`）会**全被隐藏**，用户看到的现象就是
+    "一个 IQ 文件都没有"。改成黑名单兜底后，这类文件至少能显示出来。
+
+    `folder` 传进来的就是 Kivy 过滤器给的当前目录；不传则只能靠 2)/3)/4) 判断。
     """
     name = str(name)
     if folder and name in xml_derived_names(folder):
@@ -1646,7 +1747,9 @@ def looks_like_iq(name, folder=None):
     ext = os.path.splitext(name)[1].lower()
     if ext in IQ_EXT:
         return True
-    return ext == ""
+    if ext == "":
+        return True
+    return ext not in NON_IQ_EXT
 
 
 
@@ -1678,15 +1781,56 @@ class FileBrowser(Popup):
         self.lb_path = Label(text=self.fc.path, color=C_DIM, font_size=dp(10),
                              size_hint_y=None, height=dp(20), halign="left")
         root.add_widget(self.lb_path)
-        self.fc.bind(path=lambda *_: setattr(self.lb_path, "text", self.fc.path))
+        # 目录一变就刷新"文件总数 / 可见数"——这是判断问题出在**权限**还是
+        # **过滤**最快的依据：总数 0 → 权限（读不到目录）；总数>0 而可见 0 → 过滤。
+        self.fc.bind(path=lambda *_: self._refresh_info())
         bot = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(6))
         for d in dirs[:4]:
             bot.add_widget(tbtn(os.path.basename(d.rstrip("/")) or d,
                                 lambda p=d: self._set_path(p), dp(84)))
         bot.add_widget(tbtn("取消", lambda: self.dismiss(), dp(64)))
+        # Android 11+ 读非媒体文件必须靠「所有文件访问权限」，而它不能弹窗申请，
+        # 只能跳系统设置页 —— 给个按钮免得用户找不到入口。
+        if IS_ANDROID:
+            bot.add_widget(tbtn("授权", self._grant, dp(56),
+                                bg=(0.45, 0.32, 0.15, 1)))
         bot.add_widget(tbtn("载入", self._ok, dp(64), bg=(0.20, 0.45, 0.25, 1)))
         root.add_widget(bot)
         self.content = root
+        self._refresh_info()
+
+    def _grant(self):
+        """跳「所有文件访问权限」设置页（Android 11+ 读非媒体文件必需）。"""
+        if not ensure_all_files_access(force=True):
+            self._refresh_info()
+
+    def _refresh_info(self):
+        """刷新底部信息行：路径 + 文件总数/可见数 + 子目录数。
+
+        这行是排障用的：读不到文件时，用户把这一行截图发来，
+        就能立刻区分"权限没给"（总数 0）还是"被过滤掉了"（总数>0、可见 0）。
+        """
+        p = self.fc.path
+        try:
+            names = os.listdir(p)
+        except Exception as e:
+            self.lb_path.text = "%s   ← 目录读不到（%s）" % (p, type(e).__name__)
+            return
+        files = []
+        for n in names:
+            try:
+                if os.path.isfile(os.path.join(p, n)):
+                    files.append(n)
+            except Exception:
+                pass
+        if not files and IS_ANDROID and not has_all_files_access():
+            self.lb_path.text = ("%s   读不到任何文件 —— 缺「所有文件访问权限」，"
+                                 "点「授权」开启后返回" % p)
+            return
+        vis = files if self.show_all else [n for n in files
+                                           if looks_like_iq(n, p)]
+        self.lb_path.text = "%s   文件 %d/%d 可见 · 子目录 %d" % (
+            p, len(vis), len(files), len(names) - len(files))
 
     def _filters(self):
         if self.show_all:
@@ -1738,6 +1882,7 @@ class FileBrowser(Popup):
         self.fc.filters = self._filters()
         # 按钮文字跟着状态走，避免"点了到底显示的是哪种"看不出来
         self.bt_all.text = "仅 IQ 文件" if self.show_all else "所有文件"
+        self._refresh_info()
 
     def _set_path(self, p):
         try:
