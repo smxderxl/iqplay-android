@@ -354,6 +354,65 @@ def ensure_all_files_access(force=False):
     return False
 
 
+def set_screen_orientation(mode):
+    """切换屏幕方向。`mode` 取 "landscape" / "portrait" / "auto"。
+
+    返回 True 表示已发起切换。
+
+    ⚠️ **不能用 Kivy 的 `Window.rotation`**：它只是 AliasProperty
+    （`kivy/core/window/__init__.py` 里的 `_rotation`，setter 为 None），
+    在 Android 上由系统旋转事件回写 —— **设置它不会产生任何效果**。
+    必须直接调 Activity：
+        PythonActivity.mActivity.setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_*)
+    用 SENSOR_* 而不是固定 LANDSCAPE/PORTRAIT：允许用户把手机横过来拿
+    （左右两个横向都行），体验更好。`buildozer.spec` 的 `orientation` 也要
+    放开成 `all`，否则 manifest 声明竖屏会跟这里打架。
+
+    桌面（SDL2）没有旋转 API，改为交换窗口宽高 —— 只是为了能在电脑上验证横屏布局。
+    """
+    if mode not in ("landscape", "portrait", "auto"):
+        print("未知的屏幕方向: %r" % (mode,))
+        return False
+    if IS_ANDROID:
+        try:
+            from jnius import autoclass
+            ActivityInfo = autoclass("android.content.pm.ActivityInfo")
+            code = {
+                "landscape": ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE,
+                "portrait": ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT,
+                "auto": ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED,
+            }[mode]
+            autoclass("org.kivy.android.PythonActivity").mActivity \
+                .setRequestedOrientation(code)
+            return True
+        except Exception as e:
+            print("切换屏幕方向失败: %s" % e)
+            return False
+    try:
+        from kivy.core.window import Window
+        # 桌面（SDL2）：**不要直接改 Window.size** —— Windows 的窗口管理器会把
+        # 尺寸回写回去（实测最大化窗口下交换宽高完全无效）。
+        # 改用 Window.rotation：Kivy 里 Window.size 是
+        # AliasProperty(_get_size, _set_size, bind=('_size', '_rotation'))
+        # （kivy/core/window/__init__.py:484），rotation 为 90/270 时**交换**宽高。
+        # ⚠️ 注意语义是"窗口相对内容的旋转"，不是"屏幕方向"：在横着的真实窗口上
+        #    rotation=90 得到的是**竖**视角。所以要按真实尺寸反推该给什么值。
+        try:
+            nw, nh = float(Window._size[0]), float(Window._size[1])
+        except Exception:
+            nw, nh = float(Window.size[0]), float(Window.size[1])
+        if mode == "landscape":
+            Window.rotation = 0 if nw >= nh else 90
+        elif mode == "portrait":
+            Window.rotation = 0 if nw <= nh else 90
+        else:                       # auto：交回不旋转
+            Window.rotation = 0
+        return True
+    except Exception as e:
+        print("桌面切换窗口方向失败: %s" % e)
+        return False
+
+
 def toast(msg):
     """轻提示：安卓上用 Toast（有 android 模块时），否则打印。"""
     print("[提示] %s" % msg)
@@ -1901,16 +1960,17 @@ class FileBrowser(Popup):
 
     @staticmethod
     def _tune_scrollbars(root):
-        """把 FileChooser 内部那个 ScrollView 的滚动条改成"手指拖得动"的。
+        """把 FileChooser 内部那个 ScrollView 改成"手指滑得动"的。
 
         实测（Kivy 2.3 的 kivy/data/style.kv 里 <FileChooserListLayout>）：
-        内部 ScrollView 用的是**默认值**——`scroll_type=['content']`、
-        `bar_width='2dp'`。于是：
-          · Kivy 文档写明：scroll_type 为 ['content'] 时"只能拖动内容"，
-            要含 'bars'（即 ['bars','content']）才能靠**拖滚动条本身**来滚。
-            默认不含 'bars' —— 所以手指按在右侧滑块上完全没反应。
-          · bar_width 默认 2dp，在手机上就是一根头发丝，根本按不中。
-        这里把最外层那个 ScrollView 改成 22dp 宽、常显（半透明）、可拖。
+        内部 ScrollView 用的是**默认值**，三处对触摸屏都不友好：
+          1) `scroll_type=['content']` —— Kivy 文档写明此时只能拖内容、**按滚动条
+             完全没反应**；要含 'bars' 才行。默认不含 → 手指按在滑块上没动静。
+          2) `bar_width='2dp'` —— 手机上就是一根头发丝，根本按不中。
+          3) `scroll_timeout=250` / `scroll_distance=20sp(≈30px)` —— 必须在 250ms
+             内累计移动 30px 才被认作"滚动"，否则触摸被转交给列表项按钮，
+             **慢速拖动整段失效**（手机上报"滑不动"就是这个）。
+        这里把最外层 ScrollView 改成：22dp 常显滚动条 + 1.2s/8dp 的宽松判定。
         BFS 保证先遇到最外层（真正的滚动容器），只改那一个。
         返回被改的 ScrollView（找不到返回 None，便于测试断言）。
         """
@@ -1928,6 +1988,20 @@ class FileBrowser(Popup):
                     w.bar_margin = dp(2)
                     w.bar_color = (1.0, 1.0, 1.0, 0.80)
                     w.bar_inactive_color = (1.0, 1.0, 1.0, 0.40)
+                    # ---- 手机上"滑不动"的真凶（Kivy 默认值不适合触摸屏）----
+                    # kivy/uix/scrollview.py：
+                    #   按下时  :843-845  Clock.schedule_once(self._change_touch_mode,
+                    #                     self.scroll_timeout / 1000.)
+                    #   移动时  :910-914  if ud['dy'] > self.scroll_distance:
+                    #                         ud['mode'] = 'scroll'
+                    # 即**必须在 scroll_timeout 毫秒内累计移动超过 scroll_distance**，
+                    # 否则 250ms 后 `_change_touch_mode` 判定"这不是滚动"，把触摸
+                    # 转交给子控件（列表项按钮），于是整段手势都不滚 —— 慢速拖动必然失效。
+                    # 默认 250ms / 20sp(=30px) 对手指太苛刻；放宽为
+                    # "1.2 秒内移动约 8dp"就进入滚动，慢滑也能滚。
+                    # dp(8) 是平衡点：再小会把"点击"误判成滚动（手指点击有微抖）。
+                    w.scroll_timeout = 1200
+                    w.scroll_distance = dp(8)
                 except Exception:
                     return None
                 return w
@@ -2025,7 +2099,22 @@ class RootWidget(BoxLayout):
         self.bt_xml_man.bind(on_release=lambda *_: self.app.set_xml_mode("manual"))
         bar.add(self.bt_xml_auto)
         bar.add(self.bt_xml_man)
+        # 横屏开关：图表在横屏下宽得多。按钮文字表示"点它会切到哪一边"，
+        # 所以竖屏时写「横屏」、横屏时写「竖屏」。
+        self.bt_orient = tbtn("横屏", self._toggle_orient, dp(52),
+                              bg=(0.30, 0.28, 0.45, 1))
+        bar.add(self.bt_orient)
         return bar
+
+    def _toggle_orient(self):
+        """切换横屏/竖屏。"""
+        want_land = not getattr(self.app, "is_landscape", False)
+        mode = "landscape" if want_land else "portrait"
+        if set_screen_orientation(mode):
+            self.app.is_landscape = want_land
+            self.bt_orient.text = "竖屏" if want_land else "横屏"
+        else:
+            toast("这个设备不支持切换屏幕方向")
 
     # ---- 第二行：播放控制 ----
     def _build_ctrl(self):
@@ -2090,6 +2179,9 @@ class RootWidget(BoxLayout):
 # ======================================================================
 class IQApp(App):
     title = "IQ 信号综合分析仪（安卓版）"
+
+    # 当前是否横屏（顶部「横屏/竖屏」按钮切换；只用于按钮文字与实际一致）
+    is_landscape = False
 
     def build(self):
         self.iq = None

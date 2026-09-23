@@ -52,7 +52,10 @@ version = 3.2
 #  - pyjnius 用于 Toast / 权限申请，会被 kivy 的 android 依赖自动带上
 requirements = python3==3.11.9,hostpython3==3.11.9,kivy==2.3.0,numpy==v2.2.6,pyjnius
 
-orientation = portrait
+# 必须写 all：程序顶部有「横屏/竖屏」按钮，运行时用
+# Activity.setRequestedOrientation 切换（见 iqplay_android.set_screen_orientation）。
+# 若这里锁成 portrait，manifest 会声明竖屏，和运行时的切换请求打架。
+orientation = all
 # 留状态栏，避免刘海遮住顶部工具条
 fullscreen = 0
 android.presplash_color = #101216
