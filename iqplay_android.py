@@ -1007,8 +1007,18 @@ def tbtn(text, cb, width=None, bg=BTN_BG, color=(1, 1, 1, 1), fs=dp(13)):
 
 
 def tlabel(text="", color=C_FG, fs=dp(12), h=None, w=None):
+    """小标签。
+
+    ⚠️ 给了 `w` / `h` 就必须**真的把 width / height 设上**：原来只设了
+    size_hint 和 text_size，width 仍是默认的 100px —— 于是 `tlabel("深度", w=dp(34))`
+    白占 100px，控制条被撑得异常宽（实测因此要多换 3~4 行）。
+    """
     lb = Label(text=text, color=color, font_size=fs, halign="left", valign="middle",
                size_hint=(None if w else 1, None if h else 1))
+    if w:
+        lb.width = w
+    if h:
+        lb.height = h
     lb.text_size = (w or 100, None) if w else (lb.width, None)
     lb.bind(size=lambda *_: setattr(lb, "text_size", (lb.width, None)))
     return lb
@@ -1043,23 +1053,99 @@ def tspinner(values, text=None, w=dp(84), cb=None):
     return sp
 
 
-class CtrlBar(ScrollView):
-    """横向可滚动的控制条（手机屏幕窄，控件一行放不下）。"""
+class CtrlBar(BoxLayout):
+    """自动换行的控制条 —— 保证**所有控件在任何分辨率下都完整显示**。
 
-    def __init__(self, h=dp(38), **kw):
-        super().__init__(size_hint_y=None, height=h, do_scroll_x=True,
-                         do_scroll_y=False, bar_width=dp(2), **kw)
-        self.row = BoxLayout(size_hint=(None, 1), spacing=dp(5),
-                             padding=(dp(5), dp(1)))
-        self.row.bind(minimum_width=self.row.setter("width"))
-        self.add_widget(self.row)
+    原来是横向 ScrollView：一行控件总宽超出屏幕时，右边的按钮会跑到屏幕外，
+    用户既看不见也点不到（实测顶部三条都溢出：`手动XML` / `速度−` / `零频`
+    后面全被裁掉）。现在改成"这一行放不下就换到下一行"，行数由内容决定，
+    高度随之自适应。
 
+    · `add(w)`：加一个控件。尺寸固定的用 `width`；想让它撑满本行剩余宽度的
+      就设 `size_hint_x`（例如文件名标签）。
+    · 高度 = 行数 × row_h（+行间距+上下留白），`size_hint_y` 恒为 None。
+    · `add_gap()` 保留但**什么都不做**：换行布局里显式间隔没意义。
+    """
+
+    def __init__(self, h=dp(36), spacing=dp(5), gap_v=dp(3),
+                 pad=(dp(5), dp(2)), flex_w=dp(70), **kw):
+        super().__init__(orientation="vertical", size_hint_y=None,
+                         spacing=gap_v, **kw)
+        self.row_h = h
+        self.hsp = spacing
+        self.pad = pad
+        self.flex_w = flex_w
+        self._items = []
+        self._reflowing = False
+        self.height = h + 2 * pad[1]
+        self.bind(width=self._reflow)
+        self._reflow()
+
+    # ---- 兼容旧 API ----
     def add(self, w):
-        self.row.add_widget(w)
+        self._items.append(w)
+        self._reflow()
         return w
 
     def add_gap(self, w=dp(10)):
-        self.row.add_widget(Widget(size_hint=(None, 1), width=w))
+        """换行布局自带换行，显式间隔没有意义：忽略（保留接口，免得旧调用报错）。"""
+        return None
+
+    # ---- 内部 ----
+    def _intrinsic(self, w):
+        """估算控件要占多宽。
+
+        `size_hint_x is None` 的是定宽控件，用它自己的 width；
+        其余视为"可伸缩"（如文件名标签），给它一个标称宽度用于换行计算，
+        真实布局时它会撑满所在行的剩余空间。
+        """
+        if w.size_hint_x is None:
+            try:
+                return float(w.width) or self.flex_w
+            except Exception:
+                return self.flex_w
+        return self.flex_w
+
+    def _reflow(self, *a):
+        if self._reflowing or not self._items:
+            return
+        avail = (self.width or Window.width) - 2 * self.pad[0]
+        if avail <= 1:
+            return
+        self._reflowing = True
+        try:
+            # ⚠️ 必须先把控件从旧行里**摘下来**：clear_widgets() 只摘掉"行"
+            # 这一层，行仍然持有它的子控件，直接再 add_widget 会报
+            # "Cannot add ..., it already has a parent"。
+            for w in self._items:
+                if w.parent is not None:
+                    w.parent.remove_widget(w)
+            self.clear_widgets()
+            rows, cur, cur_w = [], [], 0.0
+            for w in self._items:
+                cw = self._intrinsic(w)
+                need = cw + (self.hsp if cur else 0.0)
+                if cur and cur_w + need > avail:
+                    rows.append(cur)
+                    cur, cur_w, need = [], 0.0, cw
+                cur.append(w)
+                cur_w += need
+            if cur:
+                rows.append(cur)
+            for r in rows:
+                row = BoxLayout(size_hint_y=None, height=self.row_h,
+                                spacing=self.hsp, padding=(self.pad[0], 0))
+                for w in r:
+                    row.add_widget(w)
+                self.add_widget(row)
+            n = max(1, len(rows))
+            self.height = n * self.row_h + (n - 1) * self.spacing + 2 * self.pad[1]
+        finally:
+            self._reflowing = False
+
+    # 便于测试/排查：当前排成了几行
+    def row_count(self):
+        return len(self.children)
 
 
 # ======================================================================
@@ -1709,18 +1795,19 @@ class RootWidget(BoxLayout):
 
     # ---- 顶部：文件 / 采样率 / XML 自动·手动 ----
     def _build_top(self):
-        bar = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(4),
-                        padding=(dp(6), dp(2)))
+        # 也用 CtrlBar：屏幕窄时"自动XML/手动XML"会换到下一行，不会被裁掉
+        # （普通 BoxLayout 里，定宽按钮会把弹性标签挤爆、自己溢出屏幕）
+        bar = CtrlBar(h=dp(38), pad=(dp(6), dp(2)))
         with bar.canvas.before:
             self._top_c = Color(*C_BAR)
             self._top_r = Rectangle(pos=bar.pos, size=bar.size)
         bar.bind(pos=lambda *_: setattr(self._top_r, "pos", bar.pos),
                  size=lambda *_: setattr(self._top_r, "size", bar.size))
-        bar.add_widget(tbtn("文件", self.app.choose_file, dp(52),
-                            bg=(0.20, 0.35, 0.50, 1)))
+        bar.add(tbtn("文件", self.app.choose_file, dp(52),
+                     bg=(0.20, 0.35, 0.50, 1)))
         self.lb_file = Label(text="（未选择）", color=C_FG, font_size=dp(11),
                              shorten=True, shorten_from="center")
-        bar.add_widget(self.lb_file)
+        bar.add(self.lb_file)                       # size_hint_x=1 -> 撑满本行剩余
         self.bt_xml_auto = ToggleButton(text="自动XML", group="xml", state="down",
                                         size_hint=(None, 1), width=dp(68),
                                         font_size=dp(12), background_normal="",
@@ -1731,13 +1818,13 @@ class RootWidget(BoxLayout):
                                        background_color=BTN_BG)
         self.bt_xml_auto.bind(on_release=lambda *_: self.app.set_xml_mode("auto"))
         self.bt_xml_man.bind(on_release=lambda *_: self.app.set_xml_mode("manual"))
-        bar.add_widget(self.bt_xml_auto)
-        bar.add_widget(self.bt_xml_man)
+        bar.add(self.bt_xml_auto)
+        bar.add(self.bt_xml_man)
         return bar
 
     # ---- 第二行：播放控制 ----
     def _build_ctrl(self):
-        bar = CtrlBar(h=dp(40))
+        bar = CtrlBar(h=dp(38))
         with bar.canvas.before:
             self._ctl_c = Color(*C_PANEL)
             self._ctl_r = Rectangle(pos=bar.pos, size=bar.size)
