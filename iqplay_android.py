@@ -239,6 +239,34 @@ def default_work_dir():
     return ds[0] if ds else APP_DIR
 
 
+def dir_alias(d):
+    """给存储目录起个"人看得懂、且彼此不重复"的短名（弹窗里的快捷按钮用）。
+
+    不能直接用 `basename`（实测就是这么踩的）：
+      · **会重复**：`/storage/emulated/0/Download` 与 `/sdcard/Download` 都叫
+        "Download"，浪费一个按钮位；
+      · **没意义**：`/storage/emulated/0` 的 basename 是 `"0"`，按钮上就孤零零
+        一个 "0"，用户不知道那是"内部存储"。
+    """
+    d = (d or "").rstrip("/")
+    if not d:
+        return "/"
+    fixed = {
+        "/storage/emulated/0": "内部存储",
+        "/storage/emulated/0/Download": "Download",
+        "/storage/emulated/0/Documents": "Documents",
+        "/storage/emulated/0/下载": "下载",
+        "/sdcard": "sdcard",
+        "/sdcard/Download": "Download",
+    }
+    if d in fixed:
+        return fixed[d]
+    if d == APP_DIR:
+        return "程序目录"
+    base = os.path.basename(d) or d
+    return ("存储" + base) if base.isdigit() else base
+
+
 def ask_android_permissions():
     """APK 环境请求存储权限；Pydroid 3 / Termux 下由宿主自己管权限。
 
@@ -1764,7 +1792,11 @@ class FileBrowser(Popup):
         top = BoxLayout(size_hint_y=None, height=dp(34), spacing=dp(4))
         self.bt_all = tbtn("所有文件", self._toggle_all, dp(76))
         top.add_widget(self.bt_all)
-        self.in_path = tinput(default_work_dir(), w=Window.width * 0.55, h=dp(30))
+        self.in_path = tinput(default_work_dir(), w=dp(120), h=dp(30))
+        # 路径框改成弹性宽度：原来写死 `Window.width * 0.55`，而弹窗实际只有
+        # 0.96×屏宽、再扣掉 padding —— 固定宽度之和会略微超出，把「跳转」顶出去。
+        # 交给 BoxLayout 分配剩余空间，任何分辨率都不会溢出。
+        self.in_path.size_hint_x = 1
         top.add_widget(self.in_path)
         top.add_widget(tbtn("跳转", self._goto, dp(56)))
         root.add_widget(top)
@@ -1778,23 +1810,46 @@ class FileBrowser(Popup):
         # 那时再调一遍是幂等的，不会有害。
         self.bind(on_open=lambda *_: self._tune_scrollbars(self.fc))
         root.add_widget(self.fc)
-        self.lb_path = Label(text=self.fc.path, color=C_DIM, font_size=dp(10),
-                             size_hint_y=None, height=dp(20), halign="left")
+        self.lb_path = Label(text="", color=C_DIM, font_size=dp(10),
+                             size_hint_y=None, height=dp(22), halign="left")
+        # 让 halign 与 shorten 真正生效：Label 只在设了 text_size 后才按宽度处理
+        # 对齐/省略（不设的话 halign 无效且长文本会被直接裁掉）。
+        self.lb_path.bind(width=lambda *_: setattr(
+            self.lb_path, "text_size", (self.lb_path.width, None)))
+        self.lb_path.shorten = True
+        self.lb_path.shorten_from = "right"
         root.add_widget(self.lb_path)
         # 目录一变就刷新"文件总数 / 可见数"——这是判断问题出在**权限**还是
         # **过滤**最快的依据：总数 0 → 权限（读不到目录）；总数>0 而可见 0 → 过滤。
         self.fc.bind(path=lambda *_: self._refresh_info())
+
+        # ---- 快捷目录：去重 + 友好名 + **自动换行** ----
+        # 原来写成一行 `for d in dirs[:4]` 直接 basename，实测在手机上出事：
+        #   4 个按钮 dp(84) 合计 504px 已经超过屏宽 480px，再加上「取消/授权/载入」
+        #   共 780px —— 后面三个全被挤出屏幕，**「载入」按钮根本点不到**。
+        # 改成自动换行容器后，任何分辨率都不会把按钮丢到屏幕外。
+        nav = CtrlBar(h=dp(36))
+        seen = set()
+        for d in dirs:
+            alias = dir_alias(d)
+            if alias in seen:            # 去重：Download 只出现一次
+                continue
+            seen.add(alias)
+            nav.add(tbtn(alias, lambda p=d: self._set_path(p), dp(84)))
+            if len(seen) >= 6:
+                break
+        root.add_widget(nav)
+
+        # ---- 操作按钮：单独一行、右对齐，保证「载入」永远在屏幕内 ----
         bot = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(6))
-        for d in dirs[:4]:
-            bot.add_widget(tbtn(os.path.basename(d.rstrip("/")) or d,
-                                lambda p=d: self._set_path(p), dp(84)))
+        bot.add_widget(Widget())         # 弹簧：把按钮推到右边
         bot.add_widget(tbtn("取消", lambda: self.dismiss(), dp(64)))
         # Android 11+ 读非媒体文件必须靠「所有文件访问权限」，而它不能弹窗申请，
         # 只能跳系统设置页 —— 给个按钮免得用户找不到入口。
         if IS_ANDROID:
             bot.add_widget(tbtn("授权", self._grant, dp(56),
                                 bg=(0.45, 0.32, 0.15, 1)))
-        bot.add_widget(tbtn("载入", self._ok, dp(64), bg=(0.20, 0.45, 0.25, 1)))
+        bot.add_widget(tbtn("载入", self._ok, dp(72), bg=(0.20, 0.45, 0.25, 1)))
         root.add_widget(bot)
         self.content = root
         self._refresh_info()
@@ -1805,16 +1860,21 @@ class FileBrowser(Popup):
             self._refresh_info()
 
     def _refresh_info(self):
-        """刷新底部信息行：路径 + 文件总数/可见数 + 子目录数。
+        """刷新底部信息行：目录（末两段）+ 文件总数/可见数 + 子目录数。
 
         这行是排障用的：读不到文件时，用户把这一行截图发来，
         就能立刻区分"权限没给"（总数 0）还是"被过滤掉了"（总数>0、可见 0）。
+
+        ⚠️ 只显示路径**末两段**：完整路径（如
+        `/storage/emulated/0/Download`）加上统计文字后超过一行宽度，会被裁掉，
+        反而看不到最关键的统计数字（实测踩过）。
         """
         p = self.fc.path
+        tail = "/".join([x for x in p.rstrip("/").split("/") if x][-2:]) or p
         try:
             names = os.listdir(p)
         except Exception as e:
-            self.lb_path.text = "%s   ← 目录读不到（%s）" % (p, type(e).__name__)
+            self.lb_path.text = "%s   ← 目录读不到（%s）" % (tail, type(e).__name__)
             return
         files = []
         for n in names:
@@ -1825,12 +1885,12 @@ class FileBrowser(Popup):
                 pass
         if not files and IS_ANDROID and not has_all_files_access():
             self.lb_path.text = ("%s   读不到任何文件 —— 缺「所有文件访问权限」，"
-                                 "点「授权」开启后返回" % p)
+                                 "点「授权」开启后返回" % tail)
             return
         vis = files if self.show_all else [n for n in files
                                            if looks_like_iq(n, p)]
         self.lb_path.text = "%s   文件 %d/%d 可见 · 子目录 %d" % (
-            p, len(vis), len(files), len(names) - len(files))
+            tail, len(vis), len(files), len(names) - len(files))
 
     def _filters(self):
         if self.show_all:
