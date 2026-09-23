@@ -377,13 +377,19 @@ def set_screen_orientation(mode):
         try:
             from jnius import autoclass
             ActivityInfo = autoclass("android.content.pm.ActivityInfo")
+            # ⚠️ 用**固定**的 LANDSCAPE / PORTRAIT，不要用 SENSOR_*：
+            # 用户反馈"点横屏只横一下就又回竖屏了"。SENSOR_* 把最终方向交给传感器
+            # 判断，部分 ROM（尤其国产）在窗口重建后会按自己的规则再决定一次，
+            # 于是刚转过去就被弹回竖屏。固定值是最"硬"的锁定，不依赖传感器。
             code = {
-                "landscape": ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE,
-                "portrait": ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT,
+                "landscape": ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE,
+                "portrait": ActivityInfo.SCREEN_ORIENTATION_PORTRAIT,
                 "auto": ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED,
             }[mode]
-            autoclass("org.kivy.android.PythonActivity").mActivity \
-                .setRequestedOrientation(code)
+            act = autoclass("org.kivy.android.PythonActivity").mActivity
+            act.setRequestedOrientation(code)
+            # 再复核一次：万一还是被系统改回去，就再要求一遍
+            Clock.schedule_once(lambda dt: verify_screen_orientation(mode), 1.2)
             return True
         except Exception as e:
             print("切换屏幕方向失败: %s" % e)
@@ -411,6 +417,34 @@ def set_screen_orientation(mode):
     except Exception as e:
         print("桌面切换窗口方向失败: %s" % e)
         return False
+
+
+def verify_screen_orientation(mode):
+    """复核屏幕方向有没有被系统改回去；不对就**再要求一次**。
+
+    用户反馈"点横屏只横一下就又回竖屏" —— 说明第一次请求生效了但随即被覆盖。
+    这里在请求后 1.2 秒读一次真实方向（Configuration.orientation），不符就再设。
+    """
+    if not IS_ANDROID or mode not in ("landscape", "portrait"):
+        return None
+    try:
+        from jnius import autoclass
+        act = autoclass("org.kivy.android.PythonActivity").mActivity
+        conf = act.getResources().getConfiguration()
+        C = autoclass("android.content.res.Configuration")
+        now_land = (conf.orientation == C.ORIENTATION_LANDSCAPE)
+        want_land = (mode == "landscape")
+        if now_land == want_land:
+            return True
+        ActivityInfo = autoclass("android.content.pm.ActivityInfo")
+        act.setRequestedOrientation(
+            ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE if want_land
+            else ActivityInfo.SCREEN_ORIENTATION_PORTRAIT)
+        print("屏幕方向被系统改回去了，已再次请求 %s" % mode)
+        return False
+    except Exception as e:
+        print("复核屏幕方向失败: %s" % e)
+        return None
 
 
 def toast(msg):
@@ -446,8 +480,13 @@ class AudioPlayer(object):
         except Exception:
             self.tmp_wav = os.path.join(APP_DIR, "demod.wav")
 
-    def play(self, audio_f32, rate=D.AUDIO_OUT_RATE):
-        """audio_f32：float32 单声道。返回 (是否成功, 说明)。"""
+    def play(self, audio_f32, rate=D.AUDIO_OUT_RATE, loop=False):
+        """audio_f32：float32 单声道。loop=True 时**循环播放**直到 stop()。
+
+        用户反馈"调制并播放只响一下"——Kivy 的 Sound 播完就停，所以解调出来的
+        短音频（几百毫秒）一闪而过。这里把 loop 透给播放后端，让它一直循环。
+        返回 (是否成功, 说明)。
+        """
         try:
             D.save_iq_wav  # noqa: B018  只是确保算法层就绪
             data = D.float32_to_wav_bytes(audio_f32, rate)
@@ -466,18 +505,34 @@ class AudioPlayer(object):
                     pass
             self._snd = SoundLoader.load(self.tmp_wav)
             if self._snd:
+                try:
+                    self._snd.loop = bool(loop)
+                except Exception as e:
+                    print("设置循环播放失败（将只播一遍）: %s" % e)
                 self._snd.play()
-                return True, "正在播放（%.1fs）" % (len(audio_f32) / float(rate))
+                return True, ("循环播放中（单段 %.1fs）"
+                              % (len(audio_f32) / float(rate)) if loop
+                              else "正在播放（%.1fs）" % (len(audio_f32) / float(rate)))
         except Exception as e:
             print("Kivy 音频播放失败:", e)
         # 2) Windows 兜底
         try:
             import winsound
-            winsound.PlaySound(self.tmp_wav, winsound.SND_FILENAME | winsound.SND_ASYNC)
+            flags = winsound.SND_FILENAME | winsound.SND_ASYNC
+            if loop:
+                flags |= winsound.SND_LOOP
+            winsound.PlaySound(self.tmp_wav, flags)
             return True, "正在播放（winsound）"
         except Exception as e:
             print("winsound 播放失败:", e)
         return False, "本机没有可用的音频后端，已存到 %s" % self.tmp_wav
+
+    def is_playing(self):
+        """当前是否正在出声（给"播放/停止"按钮判断用）。"""
+        try:
+            return bool(self._snd is not None and self._snd.state == "play")
+        except Exception:
+            return False
 
     def stop(self):
         try:
@@ -808,13 +863,43 @@ class SpectrumPlot(PlotBase):
             lo = hi - 10.0
         return [lo, hi]
 
+    # 首次确定视图范围时，把**信号峰值**对齐到屏幕正中。
+    # 用户反馈"频谱显示往左边偏移，要居中显示"—— IQ 文件的载波不一定落在 0 Hz
+    # （实测某个 5 kHz 单音就偏在 5.2% 处），直接把 [−fs/2, fs/2] 铺满屏幕的话
+    # 信号会明显偏一边。这里改成"居中显示峰值"，用户手动平移/缩放后不会被拉回
+    # （只在 _home 未定或 force=True 时居中一次）。
+    auto_center = True
+
     def refresh_view(self, force=False):
         if self.freq_hz is None or not len(self.freq_hz):
             return
         if force or self._home is None:
             self.xlim = [float(self.freq_hz[0]), float(self.freq_hz[-1])]
+            if self.auto_center:
+                self._center_xlim_on_peak()
             self.ylim = self.auto_ylim()
             self._home = (list(self.xlim), list(self.ylim))
+
+    def _center_xlim_on_peak(self):
+        """把频率轴整体平移到"峰值在正中"（只平移、不缩放）。"""
+        if self.rt is None or not len(self.rt) or self.freq_hz is None:
+            return
+        try:
+            fpk = float(self.freq_hz[int(np.argmax(self.rt))])
+        except Exception:
+            return
+        half = (float(self.xlim[1]) - float(self.xlim[0])) / 2.0
+        if half > 0:
+            self.xlim = [fpk - half, fpk + half]
+
+    def center_on_peak(self):
+        """手动居中（供界面按钮用）。返回是否成功。"""
+        if self.freq_hz is None or self.rt is None:
+            return False
+        self._center_xlim_on_peak()
+        self._home = (list(self.xlim), list(self.ylim))
+        self.redraw()
+        return True
 
     def _clip(self, arr, x0p, y0p, x1p, y1p):
         """把 (freq, amp) 裁剪到当前视图，并映射成像素点串。"""
@@ -1603,7 +1688,10 @@ class ModPage(PageBase):
         bar.add(tbtn("自动识别", self.identify, dp(74), bg=(0.20, 0.42, 0.30, 1)))
         self.sp_mode = tspinner(["AM", "FM"], "FM", dp(58), cb=lambda t: self.draw())
         bar.add(self.sp_mode)
-        bar.add(tbtn("解调并播放", self.play_audio, dp(86), bg=(0.30, 0.28, 0.45, 1)))
+        # 播放/停止一个按钮：用户要"持续播放"，所以播放中是循环的，再点一次停
+        self.bt_play = tbtn("解调并播放", self.play_audio, dp(86),
+                            bg=(0.30, 0.28, 0.45, 1))
+        bar.add(self.bt_play)
         bar.add(tbtn("存WAV", self.save_wav, dp(64)))
         self.add_widget(bar)
         self.const = ConstPlot(size_hint=(1, 1))
@@ -1707,6 +1795,12 @@ class ModPage(PageBase):
         run_bg(work, done, lambda e: setattr(self.info, "text", "识别失败: %s" % e))
 
     def play_audio(self):
+        # 正在播 → 这次点击是"停止"（用户要的是持续播放，所以做成播放/停止同一个键）
+        if self.app.audio.is_playing():
+            self.app.audio.stop()
+            self.bt_play.text = "解调并播放"
+            self.info.text = "已停止播放"
+            return
         got = self.get_block()
         if not got:
             toast("先载入 IQ 文件并设置采样率")
@@ -1721,8 +1815,10 @@ class ModPage(PageBase):
 
         def done(res):
             audio, info = res
-            ok, msg = self.app.audio.play(audio)
+            # loop=True：解调出来通常只有几百毫秒，不循环就是"响一下就没了"
+            ok, msg = self.app.audio.play(audio, loop=True)
             self._audio = audio
+            self.bt_play.text = "停止" if ok else "解调并播放"
             self.info.text = ("%s 解调: %.2fs｜峰值 %.1f dB｜%s"
                               % (mode, info.get("dur_s", 0), info.get("peak_db", 0), msg))
             if not ok:
@@ -1981,7 +2077,9 @@ class FileBrowser(Popup):
           3) `scroll_timeout=250` / `scroll_distance=20sp(≈30px)` —— 必须在 250ms
              内累计移动 30px 才被认作"滚动"，否则触摸被转交给列表项按钮，
              **慢速拖动整段失效**（手机上报"滑不动"就是这个）。
-        这里把最外层 ScrollView 改成：22dp 常显滚动条 + 1.2s/8dp 的宽松判定。
+        这里把最外层 ScrollView 改成：22dp 常显滚动条 + 450ms/8dp 的判定。
+        ⚠️ 超时不能设太大：试过 1200ms，点击列表项要等一秒多才响应，
+        手感变成"点了没反应、过一会页面才跳"。
         BFS 保证先遇到最外层（真正的滚动容器），只改那一个。
         返回被改的 ScrollView（找不到返回 None，便于测试断言）。
         """
@@ -2005,13 +2103,16 @@ class FileBrowser(Popup):
                     #                     self.scroll_timeout / 1000.)
                     #   移动时  :910-914  if ud['dy'] > self.scroll_distance:
                     #                         ud['mode'] = 'scroll'
-                    # 即**必须在 scroll_timeout 毫秒内累计移动超过 scroll_distance**，
-                    # 否则 250ms 后 `_change_touch_mode` 判定"这不是滚动"，把触摸
-                    # 转交给子控件（列表项按钮），于是整段手势都不滚 —— 慢速拖动必然失效。
-                    # 默认 250ms / 20sp(=30px) 对手指太苛刻；放宽为
-                    # "1.2 秒内移动约 8dp"就进入滚动，慢滑也能滚。
-                    # dp(8) 是平衡点：再小会把"点击"误判成滚动（手指点击有微抖）。
-                    w.scroll_timeout = 1200
+                    # 即**必须在 scroll_timeout 毫秒内累计移动超过 scroll_distance**
+                    # 才会进入"滚动模式"；否则到点后把触摸**转交给子控件**
+                    # （列表项按钮）—— 慢速拖动整段失效。
+                    # 默认 250ms / 20sp(=30px) 对细手指太苛刻；但要小心：
+                    #   · timeout 太大（试过 1200）→ **点击列表项要等 1 秒多才响应**，
+                    #     手感像"点了没反应，过一会儿页面才跳"；
+                    #   · distance 太小 → 点击时的微抖被误判成滚动，反而点不中。
+                    # 450ms + 8dp 是实测比较舒服的平衡：手指在列表上轻轻上下滑就能
+                    # 跟着滚，点击也能在半秒内响应。
+                    w.scroll_timeout = 450
                     w.scroll_distance = dp(8)
                 except Exception:
                     return None

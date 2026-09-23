@@ -256,7 +256,7 @@ class SignalPicker(Popup):
                              bar_color=(1, 1, 1, .8), bar_inactive_color=(1, 1, 1, .4))
         # 手机上滑不动的三条必须都改（见 kivy-android-port 技能第 15 条）
         self.sv.scroll_type = ["bars", "content"]
-        self.sv.scroll_timeout = 1200
+        self.sv.scroll_timeout = 450        # 太大点击会迟钝（见 kivy-android-port 第 15 条）
         self.sv.scroll_distance = dp(8)
         self.box = BoxLayout(orientation="vertical", size_hint_y=None,
                              spacing=dp(6), padding=(dp(2), dp(2)))
@@ -345,7 +345,7 @@ class ParamDialog(Popup):
         sv = ScrollView(bar_width=dp(22), bar_margin=dp(2),
                         bar_color=(1, 1, 1, .8), bar_inactive_color=(1, 1, 1, .4))
         sv.scroll_type = ["bars", "content"]
-        sv.scroll_timeout = 1200
+        sv.scroll_timeout = 450
         sv.scroll_distance = dp(8)
         inner = BoxLayout(orientation="vertical", size_hint_y=None,
                           spacing=dp(8), padding=(dp(2), dp(4)))
