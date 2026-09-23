@@ -1507,37 +1507,60 @@ class ModPage(PageBase):
 IQ_EXT = (".cs16", ".c16", ".cf32", ".cfile", ".complex", ".cu8", ".cs8",
           ".wav", ".bin", ".iq", ".dat")
 
-# 明确属于"非 IQ 数据"的扩展名：文件浏览器默认隐藏这些，免得一屏全是
-# 图片 / 文档 / 侧车 xml（signalwave 目录里就有 272 个同名 .xml）。
-# 判据是"黑名单"而不是"白名单"—— 见 looks_like_iq() 的说明。
-NON_IQ_EXT = {
-    ".xml", ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".ico", ".svg",
-    ".txt", ".md", ".rst", ".log", ".ini", ".cfg", ".conf", ".yaml", ".yml",
-    ".json", ".csv", ".tsv", ".xls", ".xlsx", ".doc", ".docx", ".ppt", ".pptx",
-    ".pdf", ".zip", ".rar", ".7z", ".gz", ".tar", ".apk", ".jar", ".so",
-    ".py", ".pyc", ".pyo", ".pyd", ".sh", ".bat", ".cmd", ".exe", ".dll",
-    ".ttf", ".ttc", ".otf", ".mp3", ".mp4", ".avi", ".mkv", ".mov", ".flac",
-    ".m4a", ".ogg", ".db", ".sqlite", ".html", ".htm", ".bak",
-    ".spec", ".toml", ".lock", ".patch", ".diff", ".in", ".asc", ".sig",
-}
+# 「从 xml 反推 IQ 文件名」的目录索引缓存：{绝对路径: (目录签名, 名字集合)}
+_XML_INDEX_CACHE = {}
 
 
-def looks_like_iq(name):
-    """这个文件名看起来像不像 IQ 数据文件？（文件浏览器的过滤器用）
+def xml_derived_names(folder):
+    """从目录里的 `<名字>.xml` 反推出 IQ 文件名集合（带缓存）。
 
-    ⚠️ 不能用 `os.path.splitext(name)[1] == ""` 来判"有没有扩展名"：
-    signalwave 里的素材名形如 `16psk_25k_24.3k_0.1`、`2fsk_12.7k_4k`，
-    **名字里本身就带点**（带宽 24.3k、滚降 0.1），splitext 会取出
-    '.1' / '.7k_4k' 这种"假扩展名"，于是这些真波形全被当成"别的文件"隐藏掉。
-    实测：那个目录 547 个文件，旧逻辑只能显示 135 个，**412 个看不见**。
+    这是**最权威的识别方式**：素材 / 录制目录里每个 IQ 数据文件都配一个
+    `<文件名>.xml`（里面存 sample_rate，程序也靠它读采样率，见
+    `xml_candidates()`），所以把 `.xml` 去掉剩下的就是 IQ 文件名。
 
-    所以改成黑名单：扩展名明确属于非 IQ 类型才隐藏，其余一律当作可能的 IQ 文件。
-    目录不受影响（Kivy 的 filter_dirs 默认 False，目录始终显示）。
+    比"按扩展名猜"可靠得多 —— 那类名字里自带点的
+    （`16psk_25k_24.3k_0.1`、`2fsk_12.7k_4k`）会把 `os.path.splitext` 骗过去，
+    取到 `'.1'`、`'.7k_4k'` 这种"假扩展名"，于是真文件全被隐藏
+    （实测某目录 547 个文件里 412 个看不见）。
     """
-    ext = os.path.splitext(str(name))[1].lower()
+    try:
+        key = os.path.abspath(folder)
+        st = os.stat(key)
+        sig = (st.st_mtime_ns, st.st_ino)
+    except Exception:
+        key, sig = str(folder), None
+    hit = _XML_INDEX_CACHE.get(key)
+    if hit is not None and hit[0] == sig:
+        return hit[1]
+    names = set()
+    try:
+        for n in os.listdir(folder):
+            if len(n) > 4 and n.lower().endswith(".xml"):
+                names.add(n[:-4])                 # 去掉 ".xml" 就是 IQ 文件名
+    except Exception:
+        pass
+    _XML_INDEX_CACHE[key] = (sig, names)
+    return names
+
+
+def looks_like_iq(name, folder=None):
+    """这个文件是不是 IQ 数据文件？（文件浏览器的过滤器用）
+
+    判据按可靠性排序：
+      1) 同目录下存在 `<文件名>.xml` —— **确凿**：文件名就是从 xml 反推出来的；
+      2) 扩展名是明确的 IQ 格式（.cs16 / .cf32 / .wav …）；
+      3) 完全没有扩展名 —— 原始 IQ 转储的常见形态；
+      4) 其余不算（想看全部就按界面上的「所有文件」）。
+
+    `folder` 传进来的就是 Kivy 过滤器给的当前目录；不传则只能靠 2)/3) 判断。
+    """
+    name = str(name)
+    if folder and name in xml_derived_names(folder):
+        return True
+    ext = os.path.splitext(name)[1].lower()
     if ext in IQ_EXT:
         return True
-    return ext not in NON_IQ_EXT
+    return ext == ""
 
 
 
@@ -1550,7 +1573,8 @@ class FileBrowser(Popup):
                          title_color=C_FG, separator_color=C_ACCENT, **kw)
         root = BoxLayout(orientation="vertical", spacing=dp(4), padding=dp(4))
         top = BoxLayout(size_hint_y=None, height=dp(34), spacing=dp(4))
-        top.add_widget(tbtn("所有文件", self._toggle_all, dp(76)))
+        self.bt_all = tbtn("所有文件", self._toggle_all, dp(76))
+        top.add_widget(self.bt_all)
         self.in_path = tinput(default_work_dir(), w=Window.width * 0.55, h=dp(30))
         top.add_widget(self.in_path)
         top.add_widget(tbtn("跳转", self._goto, dp(56)))
@@ -1581,7 +1605,9 @@ class FileBrowser(Popup):
     def _filters(self):
         if self.show_all:
             return ["*"]
-        return [lambda folder, name: looks_like_iq(name)]
+        # ⚠️ 必须把 Kivy 传进来的 folder 一起交给 looks_like_iq：识别 IQ 文件靠的
+        # 是"同目录下有没有同名 .xml"（从 xml 反推文件名），不看目录就判不出来。
+        return [lambda folder, name: looks_like_iq(name, folder)]
 
     @staticmethod
     def _tune_scrollbars(root):
@@ -1624,6 +1650,8 @@ class FileBrowser(Popup):
     def _toggle_all(self):
         self.show_all = not self.show_all
         self.fc.filters = self._filters()
+        # 按钮文字跟着状态走，避免"点了到底显示的是哪种"看不出来
+        self.bt_all.text = "仅 IQ 文件" if self.show_all else "所有文件"
 
     def _set_path(self, p):
         try:
