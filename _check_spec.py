@@ -27,6 +27,10 @@ buildozer.spec 静态检查 —— 专查本项目在云端构建时真实踩过
       （--force-reinstall 不会删除新版本里已不存在的旧文件，混装依旧）
   [8] workflow 里对缓存目录（~/.buildozer）用 find 必须加 `|| true`：
       冷缓存时目录不存在，find 返回非 0 会让该步骤直接失败
+  [9] 收集产物必须只取 bin/ 下那一份，不能 `find . -name "*.apk"` 全盘搜：
+      一次构建会在三个路径各留一份**完全相同**的 apk（gradle 原始输出 /
+      p4a 的 _finish_package 复制到它工作目录的带版本副本 / bin 下的最终产物），
+      artifact 解压后出现 3 个 apk，用户不知道装哪个
 """
 import configparser
 import os
@@ -347,6 +351,35 @@ def main():
             fails.append("workflow find 缺 || true")
         else:
             print("    OK  workflow 里的 find 都有容错")
+
+    # ---- [9] 收集产物只取 bin/ 下那一份 ----
+    print("\n[9] workflow 收集 apk 的方式")
+    if not os.path.exists(WORKFLOW):
+        print("    [FAIL] workflow 缺失")
+        fails.append("workflow 缺失")
+    else:
+        wf = open(WORKFLOW, encoding="utf-8").read()
+        code = "\n".join(l for l in wf.splitlines()
+                         if not l.lstrip().startswith("#"))
+        # find 全盘收 apk 的两种常见写法，都算命中
+        broad = (re.search(r"find[^\n]*\.apk[^\n]*cp", code)
+                 or re.search(r"find[^\n]*-name\s*[\"']\*\.apk[\"'][^\n]*"
+                              r"(-exec|-print|>|\|)", code))
+        if broad:
+            print("    [FAIL] 用 find 全盘收集 *.apk：一次构建会在三个路径各留一份"
+                  "**完全相同**的 apk（gradle 原始输出 / p4a 的 _finish_package 复制"
+                  "到 p4a 工作目录的带版本副本 / bin 下的最终产物），artifact 解压后"
+                  "会出现 3 个 apk，用户不知道装哪个。只 cp bin/*.apk")
+            fails.append("全盘收集 apk")
+        elif re.search(r"cp\s+[^\n]*bin/\*\.apk", code):
+            print("    OK  只收集 bin/ 下的最终产物")
+        else:
+            print("    [WARN] 没看到 `cp .../bin/*.apk` 形式的收集步骤，请确认产物来源")
+        if "SHORT_SHA" in code:
+            print("    OK  artifact 名带提交短哈希，不同次构建可区分")
+        else:
+            print("    [WARN] artifact 名里没有短哈希：多次构建下载下来文件名相同，"
+                  "不好分辨是哪次的")
 
     # ---- 汇总 ----
     print("\n" + "=" * 46)

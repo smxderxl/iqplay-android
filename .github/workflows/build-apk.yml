@@ -142,23 +142,36 @@ jobs:
       - name: 构建 APK
         run: bash ci_build_apk.sh
 
+      # ⚠️ 只收 buildozer 的最终产物（bin/ 下那一个），**不要**用 find 全盘搜。
+      # 实测：一次构建会在三个地方各留一份 apk ——
+      #   1) .../build-*/dists/iqplay/build/outputs/apk/debug/iqplay-debug.apk
+      #      （gradle 的原始输出）
+      #   2) .../platform/python-for-android/iqplay-debug-<版本>.apk
+      #      （p4a 的 _finish_package 把上一步 cp 到它的工作目录，见
+      #        pythonforandroid/toolchain.py:1140-1146 package_add_version 分支）
+      #   3) bin/<包名>-<版本>-<架构>-debug.apk   ← buildozer 复制出的最终产物
+      # 三份二进制完全相同，但一起塞进 artifact 会让人不知道该装哪个。
       - name: 收集产物
         run: |
           set -e
-          echo "== 找到的 APK =="
-          find _apk_stage -name "*.apk" -type f -exec ls -lh {} \;
+          ls -lh _apk_stage/bin/*.apk
           mkdir -p apk-out
-          find _apk_stage -name "*.apk" -type f -exec cp {} apk-out/ \;
+          cp _apk_stage/bin/*.apk apk-out/
           # 顺手把构建日志也带上，方便排查真机问题
           for lg in _apk_stage/.buildozer/android/platform/build-*/build.log; do
             [ -f "$lg" ] && cp "$lg" apk-out/ || true
           done
+          # 记下文件名与短哈希，让不同次构建的产物一眼能区分
+          apk=$(basename "$(ls _apk_stage/bin/*.apk | head -1)")
+          echo "APK_FILE=$apk" >> "$GITHUB_ENV"
+          echo "SHORT_SHA=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+          echo "== 本次产物 =="
           ls -la apk-out
 
       - name: 上传 APK
         uses: actions/upload-artifact@v4
         with:
-          name: iqplay-apk
+          name: iqplay-apk-${{ env.SHORT_SHA }}
           path: apk-out/
           if-no-files-found: error
           retention-days: 30
