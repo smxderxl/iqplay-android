@@ -643,27 +643,65 @@ class PlotBase(Widget):
         raise NotImplementedError
 
     # ---- 坐标映射 ----
+    def content_rect(self):
+        """真正用来画数据/网格的矩形 (x0p, y0p, x1p, y1p)。
+
+        ⚠️ 这里必须和 `_draw_axes()` / `_redraw()` 用同一套内缩：
+        左留 dp(46) 给 Y 轴标签、下留 dp(20) 给 X 轴标签、右/上各留 dp(6)。
+
+        以前 `px()/inv_x()/_clip()` 用的是**整个控件尺寸**（self.x .. self.right），
+        而网格与边框用的是这个内缩矩形 —— 两者不一致，于是曲线和刻度数字相对网格
+        整体**左移 dp(20)**（(46-6)/2）、下移 dp(7)。
+
+        这正是用户反馈的「频谱显示往左边偏移、瀑布图也偏」。实测吻合：
+        内容区宽约 668dp，20dp / 668dp ≈ 3%，在截图里对应约 11px 的偏移。
+        """
+        pad_l, pad_b, pad_r, pad_t = dp(46), dp(20), dp(6), dp(6)
+        x0p = self.x + pad_l
+        y0p = self.y + pad_b
+        x1p = max(x0p + 1.0, self.right - pad_r)
+        y1p = max(y0p + 1.0, self.top - pad_t)
+        return x0p, y0p, x1p, y1p
+
     def px(self, x):
-        x0, x1 = self.xlim
-        w = max(1.0, self.width)
-        if x1 == x0:
-            return self.x
-        return self.x + (x - x0) / (x1 - x0) * w
+        x0p, _y0, x1p, _y1 = self.content_rect()
+        xv0, xv1 = self.xlim
+        if xv1 == xv0:
+            return x0p
+        return x0p + (x - xv0) / (xv1 - xv0) * (x1p - x0p)
 
     def py(self, y):
-        y0, y1 = self.ylim
-        h = max(1.0, self.height)
-        if y1 == y0:
-            return self.y
-        return self.y + (y - y0) / (y1 - y0) * h
+        _x0, y0p, _x1, y1p = self.content_rect()
+        yv0, yv1 = self.ylim
+        if yv1 == yv0:
+            return y0p
+        return y0p + (y - yv0) / (yv1 - yv0) * (y1p - y0p)
 
     def inv_x(self, px_):
-        x0, x1 = self.xlim
-        return x0 + (px_ - self.x) / max(1.0, self.width) * (x1 - x0)
+        x0p, _y0, x1p, _y1 = self.content_rect()
+        xv0, xv1 = self.xlim
+        return xv0 + (px_ - x0p) / max(1.0, x1p - x0p) * (xv1 - xv0)
 
     def inv_y(self, py_):
-        y0, y1 = self.ylim
-        return y0 + (py_ - self.y) / max(1.0, self.height) * (y1 - y0)
+        _x0, y0p, _x1, y1p = self.content_rect()
+        yv0, yv1 = self.ylim
+        return yv0 + (py_ - y0p) / max(1.0, y1p - y0p) * (yv1 - yv0)
+
+    # ---- 默认视图范围 ----
+    # 「居中显示」：由 app 统一算一个"视图中心频率"，频谱/瀑布/余晖三页共用，
+    # 保证横轴完全一致（各页各自按自己的峰值居中会导致三个页的频率轴对不上）。
+    # 值为 None 表示直接用数据范围（标准采集就是 ±fs/2，本身已经对称）。
+    want_center = None
+
+    def default_xlim(self):
+        if self.freq_hz is None or not len(self.freq_hz):
+            return list(self.xlim)
+        f0, f1 = float(self.freq_hz[0]), float(self.freq_hz[-1])
+        c = self.want_center
+        if c is not None and f1 > f0:
+            half = (f1 - f0) / 2.0
+            return [c - half, c + half]
+        return [f0, f1]
 
     # ---- 触摸 ----
     def on_touch_down(self, touch):
@@ -725,10 +763,11 @@ class PlotBase(Widget):
         self.ylim = [ny0, ny1]
 
     def _pan(self, dx, dy):
+        x0p, y0p, x1p, y1p = self.content_rect()
         x0, x1 = self.xlim
         y0, y1 = self.ylim
-        sx = (x1 - x0) / max(1.0, self.width)
-        sy = (y1 - y0) / max(1.0, self.height)
+        sx = (x1 - x0) / max(1.0, x1p - x0p)
+        sy = (y1 - y0) / max(1.0, y1p - y0p)
         self.xlim = [x0 - dx * sx, x1 - dx * sx]
         self.ylim = [y0 - dy * sy, y1 - dy * sy]
 
@@ -748,10 +787,8 @@ class PlotBase(Widget):
         self._on_layout()
 
     def _draw_axes(self):
-        pad_l, pad_b = dp(46), dp(20)
-        x, y, w, h = self.x, self.y, self.width, self.height
-        x0p, x1p = x + pad_l, x + w - dp(6)
-        y0p, y1p = y + pad_b, y + h - dp(6)
+        x, y, h = self.x, self.y, self.height
+        x0p, y0p, x1p, y1p = self.content_rect()
         nx, ny = 6, 5
         self._lab_x.draw(self.xlabel, (x0p + x1p) / 2.0, y + dp(2),
                          color=C_DIM, align="center")
@@ -786,9 +823,7 @@ class PlotBase(Widget):
     def _redraw(self):
         if not self.get_root_window():
             return
-        pad_l, pad_b = dp(46), dp(20)
-        x0p, x1p = self.x + pad_l, self.right - dp(6)
-        y0p, y1p = self.y + pad_b, self.top - dp(6)
+        x0p, y0p, x1p, y1p = self.content_rect()
         self._draw_axes()
         try:
             self.draw_content(x0p, y0p, x1p, y1p)
@@ -863,40 +898,37 @@ class SpectrumPlot(PlotBase):
             lo = hi - 10.0
         return [lo, hi]
 
-    # 首次确定视图范围时，把**信号峰值**对齐到屏幕正中。
-    # 用户反馈"频谱显示往左边偏移，要居中显示"—— IQ 文件的载波不一定落在 0 Hz
-    # （实测某个 5 kHz 单音就偏在 5.2% 处），直接把 [−fs/2, fs/2] 铺满屏幕的话
-    # 信号会明显偏一边。这里改成"居中显示峰值"，用户手动平移/缩放后不会被拉回
-    # （只在 _home 未定或 force=True 时居中一次）。
-    auto_center = True
-
+    # 首次确定视图范围时，把「信号峰值」放到屏幕正中。
+    #
+    # ⚠️ 注意：「往左偏移」的真正原因是坐标映射用了整个控件宽度（见 content_rect
+    # 的说明），不是视图范围的问题。这里的居中只处理"载波本身不在 0 Hz"的情况：
+    # IQ 文件的载波不一定落在 0 Hz，整段带宽铺满屏幕时信号会明显偏在一边。
+    #
+    # 中心频率由 app 统一算（`app.center_hz`）后写给三个绘图页，所以频谱/瀑布/
+    # 余晖的横轴始终一致 —— 各页各自按自己的峰值居中会让三页轴对不上。
     def refresh_view(self, force=False):
         if self.freq_hz is None or not len(self.freq_hz):
             return
         if force or self._home is None:
-            self.xlim = [float(self.freq_hz[0]), float(self.freq_hz[-1])]
-            if self.auto_center:
-                self._center_xlim_on_peak()
+            self.xlim = self.default_xlim()
             self.ylim = self.auto_ylim()
             self._home = (list(self.xlim), list(self.ylim))
 
-    def _center_xlim_on_peak(self):
-        """把频率轴整体平移到"峰值在正中"（只平移、不缩放）。"""
+    def _peak_hz(self):
         if self.rt is None or not len(self.rt) or self.freq_hz is None:
-            return
+            return None
         try:
-            fpk = float(self.freq_hz[int(np.argmax(self.rt))])
+            return float(self.freq_hz[int(np.argmax(self.rt))])
         except Exception:
-            return
-        half = (float(self.xlim[1]) - float(self.xlim[0])) / 2.0
-        if half > 0:
-            self.xlim = [fpk - half, fpk + half]
+            return None
 
     def center_on_peak(self):
-        """手动居中（供界面按钮用）。返回是否成功。"""
-        if self.freq_hz is None or self.rt is None:
+        """手动居中：把「视图中心频率」设到当前峰值。返回是否成功。"""
+        fpk = self._peak_hz()
+        if fpk is None:
             return False
-        self._center_xlim_on_peak()
+        self.want_center = fpk
+        self.xlim = self.default_xlim()
         self._home = (list(self.xlim), list(self.ylim))
         self.redraw()
         return True
@@ -923,8 +955,10 @@ class SpectrumPlot(PlotBase):
             f2 = f[:m].reshape(npx, k).mean(axis=1)
         else:
             a2, f2 = a, f
-        xs = self.x + (f2 - self.xlim[0]) / (self.xlim[1] - self.xlim[0] + 1e-30) * self.width
-        ys = self.y + (a2 - self.ylim[0]) / (self.ylim[1] - self.ylim[0] + 1e-30) * self.height
+        # 映射到内容区 —— 和网格/边框同一套坐标（用整个控件尺寸会整体左移 dp(20)）
+        cx0, cy0, cx1, cy1 = self.content_rect()
+        xs = cx0 + (f2 - self.xlim[0]) / (self.xlim[1] - self.xlim[0] + 1e-30) * (cx1 - cx0)
+        ys = cy0 + (a2 - self.ylim[0]) / (self.ylim[1] - self.ylim[0] + 1e-30) * (cy1 - cy0)
         np.clip(xs, x0p - 2, x1p + 2, out=xs)
         np.clip(ys, y0p - 2, y1p + 2, out=ys)
         pts = np.empty(xs.size * 2, dtype=np.float32)
@@ -959,6 +993,15 @@ class SpectrumPlot(PlotBase):
 class ImagePlot(PlotBase):
     """基类：把 (rows, cols) 的浮点矩阵按色标画成纹理。"""
 
+    # 行序要不要上下翻转。`blit_buffer` 的第 0 行落在纹理**底边**，所以：
+    #   · 瀑布图 buf[0] = 最新 → 要翻转，最新才在顶部（与桌面版
+    #     `imshow(origin="upper", extent=[f0,f1,t_bot,t_top])` 的朝向一致）
+    #   · 余晖图 buf 的第 0 行是**最低 dB** → **不能**翻转，
+    #     否则幅度轴上下颠倒：载波（高 dB）掉到屏幕底部、噪底跑到顶部。
+    #     桌面版余晖用的是 `origin="lower"`，正好印证。
+    #     用户反馈的"余晖谱完全不对"就是这个颠倒。
+    reverse_rows = True
+
     def __init__(self, **kw):
         self.buf = None
         self.cmap = "jet"
@@ -973,15 +1016,15 @@ class ImagePlot(PlotBase):
         with self.canvas:
             self._img_c = Color(1, 1, 1, 1)
             self._img_r = Rectangle(texture=None, pos=self.pos, size=self.size)
-        self.bind(pos=self._sync_img, size=self._sync_img)
+        # ⚠️ 这里**不要**再 bind(pos/size=self._sync_img)。
+        # 那个回调会把矩形尺寸设回整个控件大小，而正确的几何是
+        # draw_content() 每次按内容区算出来的；布局一变（比如转横屏）它就
+        # 抢先把矩形铺满，还会在 clear() 之后把 texture=None 的矩形铺成
+        # 一大块白（Kivy 会把 None 换成内置白纹理）。
 
     def set_xunit(self, unit):
         self.app_xunit = unit
         self._redraw()
-
-    def _sync_img(self, *_):
-        self._img_r.pos = (self.x, self.y)
-        self._img_r.size = (self.width, self.height)
 
     def _upload(self):
         if self.buf is None or self.buf.size == 0:
@@ -997,17 +1040,34 @@ class ImagePlot(PlotBase):
         # 若只在新建纹理时绑定，清空后再来数据就永远看不见了。
         if self._img_r.texture is not self._tex:
             self._img_r.texture = self._tex
-        # blit 的原点在左下角，行序要翻过来
-        self._tex.blit_buffer(np.ascontiguousarray(rgb[::-1]).tobytes(),
+        # blit 的原点在左下角：reverse_rows 时把行序翻过来
+        data = rgb[::-1] if self.reverse_rows else rgb
+        self._tex.blit_buffer(np.ascontiguousarray(data).tobytes(),
                               colorfmt="rgb", bufferfmt="ubyte")
+
+    def _sync_ylim(self):
+        """容器 Y 轴范围（默认就是 [0,1]；子类可覆盖成 dB 等有物理意义的量）。"""
+
+    def texture_row_of(self, r):
+        """纹理第 r 行（0 = 触底那条边）对应 `buf` 的第几行。
+
+        `blit_buffer` 的第 0 行落在纹理**底边**，而 `Rectangle` 默认的 tex_coords
+        把纹理底边贴到矩形底边，所以这个换算就等于"屏幕上从上到下是 buf 的哪几行"。
+        写成方法是为了能用断言锁住"上下没颠倒"（余晖曾经就是颠倒的）。
+        """
+        if self.buf is None:
+            return r
+        rows = self.buf.shape[0]
+        return (rows - 1) - r if self.reverse_rows else r
 
     def refresh_view(self, force=False):
         if self.freq_hz is None or not len(self.freq_hz):
             return
         if force or self._home is None:
-            self._home = ([float(self.freq_hz[0]), float(self.freq_hz[-1])],
+            self.xlim = self.default_xlim()
+            self._sync_ylim()
+            self._home = ([self.xlim[0], self.xlim[1]],
                           [self.ylim[0], self.ylim[1]])
-            self.xlim = list(self._home[0])
 
     def draw_content(self, x0p, y0p, x1p, y1p):
         # 还没载入 / 刚被清空时 freq_hz 与 buf 都可能为空。以前这里直接下标，
@@ -1017,13 +1077,21 @@ class ImagePlot(PlotBase):
             self._img_r.size = (0, 0)      # 连矩形一起收掉
             return
         self._upload()
-        # 频率范围外的东西用背景遮掉，保证横轴与频谱页一致
-        f0, f1 = self.freq_hz[0], self.freq_hz[-1]
-        total = f1 - f0 + 1e-30
-        xa = x0p + (self.xlim[0] - f0) / total * (x1p - x0p)
-        xb = x0p + (self.xlim[1] - f0) / total * (x1p - x0p)
-        self._img_r.pos = (xa, y0p)
-        self._img_r.size = (max(1.0, xb - xa), max(1.0, y1p - y0p))
+        # 按「数据范围」把图像定位到内容区里（f0→px(f0)、f1→px(f1)），
+        # 再按当前视图裁剪。**不能**把整幅图拉伸到可见宽度：放大后视图只是
+        # 数据的一个子集，拉伸会让横轴与图像对不上（原来是这么写的）。
+        ax0 = self.px(float(self.freq_hz[0]))
+        ax1 = self.px(float(self.freq_hz[-1]))
+        vx0, vx1 = max(ax0, x0p), min(ax1, x1p)
+        span = ax1 - ax0
+        if span > 1e-6 and (vx0 > ax0 + 0.5 or vx1 < ax1 - 0.5):
+            u0 = (vx0 - ax0) / span
+            u1 = (vx1 - ax0) / span
+            self._img_r.tex_coords = (u0, 0.0, u1, 0.0, u1, 1.0, u0, 1.0)
+        else:
+            self._img_r.tex_coords = (0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0)
+        self._img_r.pos = (vx0, y0p)
+        self._img_r.size = (max(1.0, vx1 - vx0), max(1.0, y1p - y0p))
 
 
 class WaterfallPlot(ImagePlot):
@@ -1032,7 +1100,8 @@ class WaterfallPlot(ImagePlot):
         self.filled = 0
         super().__init__(**kw)
         self._yfmt = lambda v: "%.0f" % v
-        self._lab_y.draw("← 频率  时间 ↓", self.x + dp(4), self.y + dp(4), color=C_DIM)
+        # 最新的一行画在**顶部**（与桌面版一致），所以时间轴是向上的
+        self._lab_y.draw("← 频率  时间↑", self.x + dp(4), self.y + dp(4), color=C_DIM)
 
     def push(self, amp_db):
         n = len(amp_db)
@@ -1065,6 +1134,11 @@ class WaterfallPlot(ImagePlot):
 
 
 class PersistencePlot(ImagePlot):
+    # 幅度轴向上递增 → 第 0 行（最低 dB）必须在**底部**，所以不翻转行序。
+    # 原来沿用了瀑布图的 rgb[::-1]，把余晖的幅度轴整个颠倒了：载波的高 dB
+    # 跑到屏幕下边、噪底跑到上边，看起来就是一团"完全不对"的形状。
+    reverse_rows = False
+
     def __init__(self, bins=256, **kw):
         self.bins = bins
         self.vmin_db = None
@@ -1073,23 +1147,35 @@ class PersistencePlot(ImagePlot):
         self.peak = 1.0
         super().__init__(**kw)
         self._yfmt = lambda v: "%.0f" % v
-        self._lab_y.draw("← 频率  幅度 ↑", self.x + dp(4), self.y + dp(4), color=C_DIM)
+        self._lab_y.draw("← 频率  幅度(dB)↑", self.x + dp(4), self.y + dp(4),
+                         color=C_DIM)
+
+    def _sync_ylim(self):
+        """Y 轴刻度用真实 dB 范围（默认的 [0,1] 对用户没有意义）。"""
+        if self.vmin_db is not None and self.vmax_db is not None \
+                and self.vmax_db > self.vmin_db:
+            self.ylim = [float(self.vmin_db), float(self.vmax_db)]
 
     def push(self, amp_db):
         n = len(amp_db)
         amp = np.asarray(amp_db, dtype=np.float64)
-        lo = float(np.percentile(amp, 2.0))
-        hi = float(np.percentile(amp, 99.8))
-        if hi > lo:
-            pad = (hi - lo) * 0.15
-            lo, hi = lo - pad, hi + pad
-        else:
-            lo, hi = -110.0, 10.0
-        need = (self.buf is None or self.buf.shape != (self.bins, n)
-                or self.vmin_db is None or lo < self.vmin_db or hi > self.vmax_db)
-        if need:
-            self.buf = np.zeros((self.bins, n), dtype=np.float32)
+        if self.vmin_db is None or self.vmax_db is None:
+            # 第一帧按本帧分布定一个 dB 量程，之后**固定**（和桌面版一样）：
+            # 越界值由下面的 clip 压到边缘 bin，不动缓冲。
+            # 原来只要 `lo < vmin_db 或 hi > vmax_db` 就重建整个缓冲 ——
+            # 噪声底稍微一抖就把积累的余晖全清掉，画面上永远只有零星几点，
+            # 这就是用户看到的"余晖谱完全不对"的第二个原因。
+            lo = float(np.percentile(amp, 2.0))
+            hi = float(np.percentile(amp, 99.8))
+            if hi - lo < 20.0:                 # 平噪底时给个合理的默认窗口
+                mid = 0.5 * (lo + hi)
+                lo, hi = mid - 10.0, mid + 10.0
+            else:
+                pad = (hi - lo) * 0.15
+                lo, hi = lo - pad, hi + pad
             self.vmin_db, self.vmax_db = lo, hi
+        if self.buf is None or self.buf.shape != (self.bins, n):
+            self.buf = np.zeros((self.bins, n), dtype=np.float32)
             self._tex = None
         self.buf *= np.float32(self.decay)
         idx = (amp - self.vmin_db) / (self.vmax_db - self.vmin_db + 1e-30) * (self.bins - 1)
@@ -1173,8 +1259,10 @@ class LinePlot(PlotBase):
             y_a = np.where(np.max(np.abs(y_a), axis=1) > 0,
                            y_a[np.arange(len(y_a)), np.argmax(np.abs(y_a), axis=1)],
                            y_a[:, 0])
-        px = self.x + (xs_a - self.xlim[0]) / (self.xlim[1] - self.xlim[0] + 1e-30) * self.width
-        py = self.y + (y_a - self.ylim[0]) / (self.ylim[1] - self.ylim[0] + 1e-30) * self.height
+        px = self.px(xs_a)
+        py = self.py(y_a)
+        px = np.asarray(px, dtype=np.float64)
+        py = np.asarray(py, dtype=np.float64)
         np.clip(px, x0p - 2, x1p + 2, out=px)
         np.clip(py, y0p - 2, y1p + 2, out=py)
         out = np.empty(px.size * 2, dtype=np.float32)
@@ -1499,6 +1587,7 @@ class SpectrumPage(PageBase):
                "播放中" if app.running else "已停止"))
 
     def redraw(self):
+        self.plot.want_center = self.app.center_hz
         self.plot.refresh_view()
         self.plot.redraw()
 
@@ -1542,6 +1631,7 @@ class WaterfallPage(PageBase):
     def redraw(self):
         p = self.plot
         p.freq_hz = self.app.freq_hz
+        p.want_center = self.app.center_hz      # 与频谱页共用同一个视图中心
         p.auto_range(True)
         p.refresh_view()
         p.redraw()
@@ -1595,6 +1685,7 @@ class PersistencePage(PageBase):
     def redraw(self):
         p = self.plot
         p.freq_hz = self.app.freq_hz
+        p.want_center = self.app.center_hz      # 与频谱页共用同一个视图中心
         p.refresh_view()
         p.redraw()
         if p.buf is not None:
@@ -1686,7 +1777,7 @@ class ModPage(PageBase):
         bar.add(self.sp_points)
         bar.add(tbtn("绘制", self.draw, dp(52)))
         bar.add(tbtn("自动识别", self.identify, dp(74), bg=(0.20, 0.42, 0.30, 1)))
-        self.sp_mode = tspinner(["AM", "FM"], "FM", dp(58), cb=lambda t: self.draw())
+        self.sp_mode = tspinner(["AM", "FM"], "FM", dp(58), cb=self._set_mode)
         bar.add(self.sp_mode)
         # 播放/停止一个按钮：用户要"持续播放"，所以播放中是循环的，再点一次停
         self.bt_play = tbtn("解调并播放", self.play_audio, dp(86),
@@ -1729,6 +1820,18 @@ class ModPage(PageBase):
     def _curve_mode(self):
         t = getattr(self, "sp_mode", None)
         return t.text if t is not None else self._mode
+
+    def _set_mode(self, mode):
+        """切换 AM / FM：重画曲线；**正在播放时用新制式重新解调播放**。
+
+        用户要求"可自由切换 AM/FM"。只重画曲线、不重放的话，耳朵里听到的还是
+        旧制式（切换等于没生效），所以播放中直接停掉、按新制式重放。
+        """
+        self.draw()
+        if self.app.audio.is_playing():
+            self.app.audio.stop()
+            self.bt_play.text = "解调并播放"
+            self.play_audio()
 
     def draw(self):
         got = self.get_block()
@@ -2315,6 +2418,7 @@ class IQApp(App):
         self.avg = None
         self.maxh = None
         self.freq_hz = None
+        self.center_hz = None       # 「居中显示」用的视图中心频率（三页共用）
         self._fs_cache = 0.0
         self._frame_i = 0
         self.xunit = "MHz"
@@ -2384,9 +2488,11 @@ class IQApp(App):
             self.avg = None
             self.maxh = None
             self.freq_hz = None
+            self.center_hz = None          # 换文件 → 重新判定"视图中心频率"
             self._fs_cache = 0.0
             for k in ("waterfall", "persistence"):
                 self.pages[k].plot.clear()
+                self.pages[k].plot._home = None   # 换了带宽/采样率要重新定视图
             # 新数据的幅度范围不一样，让频谱页重新自适应一次 Y 量程
             self.pages["spectrum"].plot._home = None
             total = os.path.getsize(path)
@@ -2558,14 +2664,47 @@ class IQApp(App):
         # 瀑布/余晖始终入队（切页时才有历史），但只重绘当前可见页
         self.pages["waterfall"].plot.push(amp)
         self.pages["persistence"].plot.push(amp)
+        # 「自动居中」：换文件后第一次拿到数据时定一次视图中心频率，之后固定不变
+        # （用户手动平移/缩放不会被拉回）。三页共用同一个值，横轴才一致。
+        if self.center_hz is None:
+            self.center_hz = self._auto_center_hz(amp)
         self._frame_i += 1
         self._redraw_visible(blk)
+
+    # 谱峰要高出中位数这么多 dB 才认作「载波」。
+    # 纯噪声（1024 个指数分布样本）的最大值天生就比中位数高约 10 dB，
+    # 不设门槛会把视图随机平移 —— 那就成了"越居中越乱"。
+    CENTER_CREST_DB = 15.0
+
+    def _auto_center_hz(self, amp):
+        """按谱峰定「视图中心频率」，让信号显示在屏幕正中。
+
+        用户反馈"频谱显示往左边偏移、要居中显示"。除了坐标映射那个 bug（见
+        PlotBase.content_rect），还有一个原因：**IQ 文件的载波不一定落在 0 Hz**，
+        把整段带宽铺满屏幕时信号自然偏在一边。这里取峰值频率当视图中心。
+
+        返回 None 表示不居中（噪底一类的平谱），此时直接用数据范围
+        —— 标准采集本身就是 ±fs/2，天然对称。
+        """
+        if self.freq_hz is None or amp is None or len(amp) < 8:
+            return None
+        try:
+            a = np.asarray(amp, dtype=np.float64)
+            a = a[np.isfinite(a)]
+            if a.size < 8:
+                return None
+            if float(np.max(a)) - float(np.median(a)) < self.CENTER_CREST_DB:
+                return None
+            return float(self.freq_hz[int(np.argmax(amp))])
+        except Exception:
+            return None
 
     def _redraw_visible(self, blk=None):
         cur = self.root_w.sm.current
         if cur == "spectrum":
             p = self.pages["spectrum"].plot
             p.freq_hz = self.freq_hz
+            p.want_center = self.center_hz
             p.refresh_view()
             p.redraw()
         elif cur in ("waterfall", "persistence"):
