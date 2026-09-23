@@ -110,6 +110,15 @@ C_MAX = (1.00, 0.32, 0.30, 1)            # 最大保持
 C_ACCENT = (0.30, 0.85, 0.45, 1)
 C_WARN = (1.00, 0.72, 0.25, 1)
 
+# ---- 字号（单位见下面说明）----
+# ⚠️ Kivy 的 font_size 给**数字**时单位是"物理像素"、不随屏幕密度缩放；
+#    只有 '12sp' 这种字符串才缩放。所以正文一律用 dp()/sp()，别写裸数字。
+#    参考：3 倍屏手机上 font_size=10（裸像素）只有 3.3dp，基本看不见。
+FS_TICK = 12          # 坐标轴刻度 / 轴标题 / 游标标注（sp）
+FS_INFO = 12          # 各页底部信息行、文件名（dp）
+FS_BTN = 13           # 按钮文字（dp）
+FS_MIN_OK = 11        # 静态检查用的下限：任何字号都不得小于这个 dp/sp 值
+
 
 # ======================================================================
 # 色图（纯 numpy 查表，给定 0~1 返回 256x3 uint8）
@@ -551,26 +560,36 @@ class AudioPlayer(object):
 # 文字精灵（坐标轴刻度，用 CoreLabel 纹理画在 canvas.after 上）
 # ======================================================================
 class LabelSprite(object):
+    """画布上的文字精灵（坐标轴刻度 / 轴标题 / 游标标注）。
+
+    ⚠️ 字号必须用 **sp（缩放像素）**：Kivy 的 `font_size` 给数字时单位是
+    **物理像素**、不随屏幕密度缩放；只有 `'12sp'` 这种写法才缩放。
+    以前这里写死 `CoreLabel(font_size=10)`，在 3 倍屏的手机上 10px 只有
+    3.3dp —— 刻度数字小到看不见（用户反馈"部分显示字体太小"的主因）。
+    而且 `__init__` 的 `font_size` 参数**根本没被使用**（`_tex` 里写死 10），
+    传什么都没用。现在改成实例属性，缓存 key 带上字号。
+    """
     _tex_cache = {}
 
-    def __init__(self, canvas, font_size=10, color=C_FG):
+    def __init__(self, canvas, font_size=None, color=C_FG):
+        # sp(12) ≈ 常规 UI 字号；刻度比正文稍小一点点，但绝不能是裸像素
+        self.fs = sp(FS_TICK) if font_size is None else font_size
         self._cs = canvas
         with canvas:
             self._c = Color(*color)
             self._r = Rectangle(texture=None, size=(0, 0))
 
-    @classmethod
-    def _tex(cls, text, color):
-        key = (text, tuple(color))
-        hit = cls._tex_cache.get(key)
+    def _tex(self, text, color):
+        key = (text, tuple(color), round(float(self.fs), 2))
+        hit = type(self)._tex_cache.get(key)
         if hit is not None:
             return hit
-        cl = CoreLabel(text=text, font_size=10, color=color)
+        cl = CoreLabel(text=text, font_size=self.fs, color=color)
         cl.refresh()
         tex = cl.texture
-        if len(cls._tex_cache) > 400:
-            cls._tex_cache.clear()
-        cls._tex_cache[key] = tex
+        if len(type(self)._tex_cache) > 400:
+            type(self)._tex_cache.clear()
+        type(self)._tex_cache[key] = tex
         return tex
 
     def draw(self, text, x, y, color=C_FG, align="left", valign="bottom"):
@@ -647,7 +666,7 @@ class PlotBase(Widget):
         """真正用来画数据/网格的矩形 (x0p, y0p, x1p, y1p)。
 
         ⚠️ 这里必须和 `_draw_axes()` / `_redraw()` 用同一套内缩：
-        左留 dp(46) 给 Y 轴标签、下留 dp(20) 给 X 轴标签、右/上各留 dp(6)。
+        左留 dp(58) 给 Y 轴刻度+轴名、下留 dp(30) 给 X 轴刻度+轴名、右/上各留 dp(6)。
 
         以前 `px()/inv_x()/_clip()` 用的是**整个控件尺寸**（self.x .. self.right），
         而网格与边框用的是这个内缩矩形 —— 两者不一致，于是曲线和刻度数字相对网格
@@ -655,8 +674,11 @@ class PlotBase(Widget):
 
         这正是用户反馈的「频谱显示往左边偏移、瀑布图也偏」。实测吻合：
         内容区宽约 668dp，20dp / 668dp ≈ 3%，在截图里对应约 11px 的偏移。
+
+        下方留白从 dp(20) 加到 dp(30)：刻度字号改大后（见 FS_TICK），
+        X 轴数字（约 12dp 高）和轴名（约 12dp）要上下叠着放才不会压在一起。
         """
-        pad_l, pad_b, pad_r, pad_t = dp(46), dp(20), dp(6), dp(6)
+        pad_l, pad_b, pad_r, pad_t = dp(58), dp(30), dp(6), dp(6)
         x0p = self.x + pad_l
         y0p = self.y + pad_b
         x1p = max(x0p + 1.0, self.right - pad_r)
@@ -790,7 +812,8 @@ class PlotBase(Widget):
         x, y, h = self.x, self.y, self.height
         x0p, y0p, x1p, y1p = self.content_rect()
         nx, ny = 6, 5
-        self._lab_x.draw(self.xlabel, (x0p + x1p) / 2.0, y + dp(2),
+        # 底部留白里上下两层：X 轴数字（12dp）在上、轴名在贴底处，别叠在一起
+        self._lab_x.draw(self.xlabel, (x0p + x1p) / 2.0, y + dp(1),
                          color=C_DIM, align="center")
         self._lab_y.draw(self.ylabel, x + dp(2), (y0p + y1p) / 2.0, color=C_DIM)
         self._lab_t.draw(self.title, x0p, y + h - dp(16), color=C_FG)
@@ -801,12 +824,12 @@ class PlotBase(Widget):
             gi += 1
             sp = self._ticks_x[i]
             if i == 0:
-                sp.draw(self._xfmt(self.xlim[0]), fx, y0p - dp(15), color=C_DIM)
+                sp.draw(self._xfmt(self.xlim[0]), fx, y0p - dp(16), color=C_DIM)
             elif i == nx:
-                sp.draw(self._xfmt(self.xlim[1]), fx, y0p - dp(15),
+                sp.draw(self._xfmt(self.xlim[1]), fx, y0p - dp(16),
                         color=C_DIM, align="right")
             else:
-                sp.draw(self._xfmt(self.inv_x(fx)), fx, y0p - dp(15),
+                sp.draw(self._xfmt(self.inv_x(fx)), fx, y0p - dp(16),
                         color=C_DIM, align="center")
         for i in range(ny + 1):
             fy = y0p + (y1p - y0p) * i / ny
@@ -1372,7 +1395,7 @@ def tcheck(text, value=True, cb=None):
                    color=(1, 1, 1, 1))
     if cb:
         cbx.bind(active=lambda *_: cb(cbx.active))
-    lb = Label(text=text, color=C_FG, font_size=dp(12))
+    lb = Label(text=text, color=C_FG, font_size=dp(FS_BTN))
     box.add_widget(cbx)
     box.add_widget(lb)
     box.cbx = cbx
@@ -1381,7 +1404,7 @@ def tcheck(text, value=True, cb=None):
 
 def tspinner(values, text=None, w=dp(84), cb=None):
     sp = Spinner(text=text or values[0], values=values, size_hint=(None, 1),
-                 width=w, font_size=dp(12), background_normal="",
+                 width=w, font_size=dp(FS_BTN), background_normal="",
                  background_color=BTN_BG)
     if cb:
         sp.bind(text=lambda *_: cb(sp.text))
@@ -1521,7 +1544,7 @@ class SpectrumPage(PageBase):
         self.add_widget(bar)
         self.plot = SpectrumPlot(size_hint=(1, 1))
         self.add_widget(self.plot)
-        self.readout = Label(text="等待载入 IQ 文件…", color=C_DIM, font_size=dp(11),
+        self.readout = Label(text="等待载入 IQ 文件…", color=C_DIM, font_size=dp(FS_INFO),
                              size_hint_y=None, height=dp(40), halign="left",
                              valign="middle")
         self.readout.bind(size=lambda *_: setattr(self.readout, "text_size",
@@ -1611,7 +1634,7 @@ class WaterfallPage(PageBase):
         self.plot = WaterfallPlot(rows=200, size_hint=(1, 1))
         self.plot.ylim = [0, 1]
         self.add_widget(self.plot)
-        self.info = Label(text="", color=C_DIM, font_size=dp(11), size_hint_y=None,
+        self.info = Label(text="", color=C_DIM, font_size=dp(FS_INFO), size_hint_y=None,
                           height=dp(22))
         self.add_widget(self.info)
 
@@ -1662,7 +1685,7 @@ class PersistencePage(PageBase):
         self.plot = PersistencePlot(bins=256, size_hint=(1, 1))
         self.plot.ylim = [0, 1]
         self.add_widget(self.plot)
-        self.info = Label(text="", color=C_DIM, font_size=dp(11), size_hint_y=None,
+        self.info = Label(text="", color=C_DIM, font_size=dp(FS_INFO), size_hint_y=None,
                           height=dp(22))
         self.add_widget(self.info)
 
@@ -1719,7 +1742,7 @@ class TimePage(PageBase):
         self.env.xlabel = "时间(ms)"
         self.env.ylabel = "包络"
         self.add_widget(self.env)
-        self.info = Label(text="", color=C_DIM, font_size=dp(11), size_hint_y=None,
+        self.info = Label(text="", color=C_DIM, font_size=dp(FS_INFO), size_hint_y=None,
                           height=dp(22))
         self.add_widget(self.info)
 
@@ -1796,7 +1819,7 @@ class ModPage(PageBase):
         self.curve.ylabel = "幅度"
         self._mode = "FM"
         self.add_widget(self.curve)
-        self.info = Label(text="", color=C_DIM, font_size=dp(11), size_hint_y=None,
+        self.info = Label(text="", color=C_DIM, font_size=dp(FS_INFO), size_hint_y=None,
                           height=dp(24), halign="left", valign="middle")
         self.info.bind(size=lambda *_: setattr(self.info, "text_size",
                                                (self.info.width, None)))
@@ -2071,7 +2094,7 @@ class FileBrowser(Popup):
         # 那时再调一遍是幂等的，不会有害。
         self.bind(on_open=lambda *_: self._tune_scrollbars(self.fc))
         root.add_widget(self.fc)
-        self.lb_path = Label(text="", color=C_DIM, font_size=dp(10),
+        self.lb_path = Label(text="", color=C_DIM, font_size=dp(FS_INFO),
                              size_hint_y=None, height=dp(22), halign="left")
         # 让 halign 与 shorten 真正生效：Label 只在设了 text_size 后才按宽度处理
         # 对齐/省略（不设的话 halign 无效且长文本会被直接裁掉）。
@@ -2308,16 +2331,16 @@ class RootWidget(BoxLayout):
                  size=lambda *_: setattr(self._top_r, "size", bar.size))
         bar.add(tbtn("文件", self.app.choose_file, dp(52),
                      bg=(0.20, 0.35, 0.50, 1)))
-        self.lb_file = Label(text="（未选择）", color=C_FG, font_size=dp(11),
+        self.lb_file = Label(text="（未选择）", color=C_FG, font_size=dp(FS_INFO),
                              shorten=True, shorten_from="center")
         bar.add(self.lb_file)                       # size_hint_x=1 -> 撑满本行剩余
         self.bt_xml_auto = ToggleButton(text="自动XML", group="xml", state="down",
                                         size_hint=(None, 1), width=dp(68),
-                                        font_size=dp(12), background_normal="",
+                                        font_size=dp(FS_BTN), background_normal="",
                                         background_color=(0.25, 0.55, 0.30, 1))
         self.bt_xml_man = ToggleButton(text="手动XML", group="xml", state="normal",
                                        size_hint=(None, 1), width=dp(68),
-                                       font_size=dp(12), background_normal="",
+                                       font_size=dp(FS_BTN), background_normal="",
                                        background_color=BTN_BG)
         self.bt_xml_auto.bind(on_release=lambda *_: self.app.set_xml_mode("auto"))
         self.bt_xml_man.bind(on_release=lambda *_: self.app.set_xml_mode("manual"))
@@ -2378,7 +2401,7 @@ class RootWidget(BoxLayout):
         self.nav_btns = {}
         for key, title in getattr(self, "nav_items", NAV):
             b = ToggleButton(text=title, group="nav", size_hint=(None, 1),
-                             width=dp(58), font_size=dp(12), background_normal="",
+                             width=dp(58), font_size=dp(FS_BTN), background_normal="",
                              background_color=BTN_BG if key != "spectrum"
                              else (0.25, 0.45, 0.65, 1))
             b.bind(on_release=lambda _b, k=key: self.goto(k))
@@ -2735,7 +2758,7 @@ class IQApp(App):
             "  · 播放控制条里的『载入点数』决定大文件只读前多少点（省内存）\n\n"
             "本版按需求去掉了 B210 发射、URH 协议分析与信号源页。\n\n"
             "字体: %s\n工作目录: %s" % (FONT_USED or "未找到", default_work_dir()))
-        Popup(title="关于", content=Label(text=txt, font_size=dp(11), halign="left",
+        Popup(title="关于", content=Label(text=txt, font_size=dp(FS_INFO), halign="left",
                                           valign="top", color=C_FG),
               size_hint=(0.92, 0.8), title_color=C_FG,
               separator_color=C_ACCENT).open()

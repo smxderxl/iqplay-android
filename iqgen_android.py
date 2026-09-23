@@ -394,7 +394,7 @@ class ParamDialog(Popup):
         w.add_widget(self.in_extra)
         inner.add_widget(w)
         hint = Label(text="上面没出现的参数都能写在这里；留空则按制式预置。",
-                     color=P.C_DIM, font_size=dp(10), size_hint_y=None,
+                     color=P.C_DIM, font_size=dp(12), size_hint_y=None,
                      height=dp(18), halign="left")
         inner.add_widget(hint)
 
@@ -507,7 +507,7 @@ class IQGenPage(P.PageBase):
         self.add_widget(self.plot_time)
 
         self.lb_info = Label(text="选一个信号 → 预览 / 导出",
-                             color=P.C_DIM, font_size=dp(10),
+                             color=P.C_DIM, font_size=dp(12),
                              size_hint_y=None, height=dp(22), halign="left",
                              valign="middle")
         self.lb_info.bind(width=lambda *_: setattr(
